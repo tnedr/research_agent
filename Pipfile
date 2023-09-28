@@ -1,0 +1,30 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+langchain = "*"
+black = "*"
+openai = "*"
+python-decouple = "*"
+google-search-results = "*"
+tweepy = "*"
+python-dotenv = "*"
+python-twitter = "*"
+flask = "*"
+faiss-cpu = "*"
+tiktoken = "*"
+streamlit = "*"
+huggingface-hub = "*"
+pypdf2 = "*"
+pypdf = "*"
+beautifulsoup4 = "*"
+fastapi = "*"
+pyautogen = "*"
+uvicorn = "*"
+
+[dev-packages]
+
+[requires]
+
