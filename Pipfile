@@ -27,4 +27,3 @@ uvicorn = "*"
 [dev-packages]
 
 [requires]
-
