@@ -3,5 +3,8 @@ openai
 python-dotenv
 pydantic==1.*
 langchain
+logging
+requests
+streamlit
 bs4
 tiktoken
