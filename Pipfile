@@ -23,6 +23,8 @@ beautifulsoup4 = "*"
 fastapi = "*"
 pyautogen = "*"
 uvicorn = "*"
+biopython = "*"
+scholarly = "*"
 
 [dev-packages]
 
