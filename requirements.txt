@@ -1,9 +1,0 @@
-fastapi[all]
-openai
-python-dotenv
-pydantic==1.*
-langchain
-requests
-streamlit
-bs4
-tiktoken

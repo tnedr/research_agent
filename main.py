@@ -1,110 +1,95 @@
-from Bio import Entrez
-import time
-from scholarly import scholarly
+from typing import List, TypedDict
+from langgraph.graph import StateGraph, START, END
+from langchain_anthropic import ChatAnthropic  # Az Anthropic Claude modell importálása
+from langchain.llms import OpenAI  # OpenAI modellek
+import os
+
+from langchain_groq import ChatGroq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain_community.tools import WikipediaQueryRun
+from langchain_community.utilities import WikipediaAPIWrapper
+from autogen import ConversableAgent
+from dotenv import load_dotenv
+import os
+import pprint
 import sys
 
-# Keresés kulcsszavak alapján a Google Scholar-on
-search_query = scholarly.search_pubs('eggs and cholesterol')
-
-for result in search_query:
-    print(f"Cím: {result['bib']['title']}")
-    print(f"Citációk száma: {result['num_citations']}")
-    print(f"Absztrakt: {result['bib']['abstract'][:200]}...")
-
-sys.exit()
-
-class ResearchArticle:
-    def __init__(self, title, abstract, citations, pmid, year):
-        self.title = title
-        self.abstract = abstract
-        self.citations = citations
-        self.pmid = pmid
-        self.year = year
-
-    def __repr__(self):
-        return f"{self.title} ({self.year}), Citations: {self.citations}"
+from autogen.agentchat.utils import gather_usage_summary
+load_dotenv()
 
 
-def fetch_paper_ids(keywords, email, max_results=100):
-    Entrez.email = email
-    search_handle = Entrez.esearch(db="pubmed", term=keywords, retmax=max_results)
-    search_results = Entrez.read(search_handle)
-    search_handle.close()
-    return search_results["IdList"]
 
+# Állítsd be az OpenAI és Anthropic API kulcsokat környezeti változókkal vagy közvetlenül itt:
+# os.environ["OPENAI_API_KEY"] = "YOUR_OPENAI_API_KEY"
+# os.environ["ANTHROPIC_API_KEY"] = "YOUR_ANTHROPIC_API_KEY"
 
-def fetch_paper_details(paper_ids):
-    papers = []
-    batch_size = 20
+class KeywordAgent:
+    def __init__(self, model_type="openai", system_prompt="Generate relevant keywords for text."):
+        self.model_type = model_type
+        self.system_prompt = system_prompt
+        self.model = self._initialize_model()
 
-    for i in range(0, len(paper_ids), batch_size):
-        batch_ids = paper_ids[i:i + batch_size]
-        try:
-            handle = Entrez.efetch(db="pubmed", id=batch_ids, rettype="xml", retmode="xml")
-            records = Entrez.read(handle)['PubmedArticle']
-            handle.close()
-
-            for record in records:
-                article = record['MedlineCitation']['Article']
-                title = article['ArticleTitle']
-                abstract = article['Abstract']['AbstractText'][0] if 'Abstract' in article else ""
-                pmid = record['MedlineCitation']['PMID']
-                year = article['Journal']['JournalIssue']['PubDate'].get('Year', 'N/A')
-
-                citation_count = fetch_citation_count(pmid)
-
-                if citation_count > 0:  # Filter out papers with zero citations
-                    papers.append(ResearchArticle(title, abstract, citation_count, pmid, year))
-
-            time.sleep(1)  # API korlátozások miatt
-
-        except Exception as e:
-            print(f"Hiba történt a következő ID-k feldolgozásakor: {batch_ids}")
-            print(f"Hiba: {str(e)}")
-            continue
-
-    return papers
-
-
-def fetch_citation_count(pmid):
-    try:
-        handle = Entrez.elink(dbfrom="pubmed", db="pubmed", linkname="pubmed_pubmed_cites", id=pmid)
-        citation_data = Entrez.read(handle)
-        handle.close()
-
-        if citation_data[0]['LinkSetDb']:
-            citation_count = len(citation_data[0]['LinkSetDb'][0]['Link'])
-            print(f"PMID {pmid} has {citation_count} citations.")
-            return citation_count
+    def _initialize_model(self):
+        if self.model_type == "openai":
+            return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        elif self.model_type == "anthropic":
+            return ChatAnthropic(model="claude-3-haiku-20240307", system_prompt=self.system_prompt)
         else:
-            print(f"PMID {pmid} has no citation links.")
-    except Exception as e:
-        print(f"Error retrieving citation count for PMID {pmid}: {e}")
-        return 0
+            raise ValueError("Invalid model_type. Use 'openai' or 'anthropic'.")
 
-    return 0
+    def generate_keywords(self, text: str):
+        prompt = f"{self.system_prompt} Input: '{text}'"
+        response = self.model(prompt)
+
+        # Kulcsszavak formázása
+        if hasattr(response, 'text'):
+            keywords_text = response.text.strip()
+        else:
+            keywords_text = response.strip()
+
+        keywords = [keyword.strip() for keyword in keywords_text.split(",")]
+        return keywords
 
 
-def fetch_top_cited_papers(keywords, email, max_results=20):
-    paper_ids = fetch_paper_ids(keywords, email)
-    papers = fetch_paper_details(paper_ids)
-
-    # Rendezés citációk száma alapján és top eredmények visszaadása
-    sorted_papers = sorted(papers, key=lambda x: x.citations, reverse=True)
-    return sorted_papers[:max_results]
+# Gráf állapotának meghatározása
+class KeywordState(TypedDict):
+    text: str
+    keywords: List[str]
+    confirmed: bool
 
 
-# Példa használat:
+# Gráf felépítése
+graph_builder = StateGraph(KeywordState)
+
+
+# 1. Csomópont: Kulcsszavak generálása
+def keyword_generation(state: KeywordState):
+    agent = KeywordAgent(model_type="anthropic")  # vagy 'openai'
+    generated_keywords = agent.generate_keywords(state["text"])
+    return {"keywords": generated_keywords, "confirmed": False}
+
+
+graph_builder.add_node("generate_keywords", keyword_generation)
+
+
+# 2. Csomópont: Emberi ellenőrzés
+def human_verification(state: KeywordState):
+    print("Please review the keywords:", state["keywords"])
+    confirmation = input("Are these keywords acceptable? (y/n): ")
+    return {"confirmed": confirmation.lower() == 'y'}
+
+
+graph_builder.add_node("verify_keywords", human_verification)
+
+# Gráf kapcsolatok
+graph_builder.add_edge("generate_keywords", "verify_keywords")
+graph_builder.add_conditional_edges("verify_keywords", lambda state: END if state["confirmed"] else "generate_keywords")
+graph_builder.add_edge(START, "generate_keywords")
+
+# Gráf futtatása
+graph = graph_builder.compile()
+
 if __name__ == "__main__":
-    keywords = "cancer"
-    email = "your.email@example.com"
-
-    top_papers = fetch_top_cited_papers(keywords, email)
-
-    for i, paper in enumerate(top_papers, 1):
-        print(f"\n{i}. Cikk:")
-        print(f"Cím: {paper.title}")
-        print(f"Citációk száma: {paper.citations}")
-        print(f"Év: {paper.year}")
-        print(f"PMID: {paper.pmid}")
-        print(f"Absztrakt: {paper.abstract[:200]}...")
+    initial_state = KeywordState(text="Your topic or text here", keywords=[], confirmed=False)
+    graph.run(initial_state)

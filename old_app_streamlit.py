@@ -1,6 +1,6 @@
 import streamlit as st
 # 4. Use streamlit to create a web app
-from agent import agent
+from old_agent import agent
 
 
 def main():
