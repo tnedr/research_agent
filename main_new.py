@@ -15,7 +15,9 @@ import requests
 from abc import ABC, abstractmethod
 from langgraph.graph import StateGraph, START, END
 from dotenv import load_dotenv
+import os
 
+os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
 
 
@@ -308,28 +310,63 @@ class ResearchWorkflow:
         return workflow.compile()
 
     def _get_human_feedback(self) -> None:
-        """Get human feedback"""
+        """Natural conversation-based human feedback"""
         print("\nHuman feedback required:")
         print(self.state.feedback_prompt)
 
-        # Simple command-line interface for feedback
-        response = input("Enter 'approve' or 'reject': ").strip().lower()
+        while True:
+            feedback = input("\nPlease provide your feedback or instructions: ").strip()
 
-        if response == 'approve':
-            self.state.needs_human_feedback = False
-        else:
-            # Handle rejection by returning to previous step
-            step_mapping = {
-                "data_collection": "keyword_generation",
-                "ranking": "data_collection",
-                "download": "ranking",
-                "analysis": "download",
-                "summary": "analysis",
-                "complete": "summary"
-            }
-            self.state.current_step = step_mapping.get(self.state.current_step,
-                                                       self.state.current_step)
-            self.state.needs_human_feedback = False
+            # Készítsünk egy promptot az LLM-nek, hogy értelmezze a visszajelzést
+            feedback_interpretation_prompt = f"""You are a helpful research assistant managing search queries.
+            Current search queries: {self.state.keywords}
+
+            User feedback: "{feedback}"
+
+            Analyze if the user:
+            1. Approves the current queries (indicates satisfaction, says yes, etc.)
+            2. Wants to modify the queries (suggests changes)
+            3. Rejects the queries (indicates dissatisfaction)
+
+            Response format using generate_scholar_queries:
+            - If approved: return the same queries
+            - If modifications needed: return modified queries
+            - If rejected: indicate in the first query with "REJECTED: reason"
+            """
+
+            messages = [
+                SystemMessage(content=self.agents["keyword"].system_prompt),
+                AIMessage(content="Current state:"),
+                HumanMessage(content=str(self.state.keywords)),
+                HumanMessage(content=feedback_interpretation_prompt)
+            ]
+
+            llm_with_tools = self.agents["keyword"].llm.bind_tools(self.agents["keyword"].tools)
+            response = llm_with_tools.invoke(messages)
+
+            tool_call = response.tool_calls[0]
+            proposed_queries = tool_call["args"]["queries"]
+
+            # Ellenőrizzük az LLM értelmezését
+            if isinstance(proposed_queries, list) and proposed_queries:
+                if str(proposed_queries[0]).startswith("REJECTED:"):
+                    # Ha az LLM elutasítást észlelt, folytassuk a beszélgetést
+                    print("\nI understand you're not satisfied. Please provide more specific feedback.")
+                    continue
+
+                if proposed_queries == self.state.keywords:
+                    # Ha az LLM jóváhagyást észlelt
+                    print("\nI understand you're satisfied with these queries.")
+                    self.state.needs_human_feedback = False
+                    self.state.current_step = "complete"
+                    break
+                else:
+                    # Ha az LLM módosításokat javasol
+                    print("\nBased on your feedback, here are the modified queries:")
+                    for i, query in enumerate(proposed_queries, 1):
+                        print(f"{i}. {query}")
+
+                    self.state.keywords = proposed_queries
 
     def run(self, topic: str) -> Dict[str, Any]:
         """Run the research workflow"""
@@ -346,6 +383,10 @@ class ResearchWorkflow:
                 # Handle human feedback if needed
                 if self.state.needs_human_feedback:
                     self._get_human_feedback()
+
+                # Ha a current_step complete, akkor kilépünk
+                if self.state.current_step == "complete":
+                    break
 
             return {
                 "topic": self.state.topic,
@@ -400,8 +441,8 @@ def main():
     # Print results
     print("\nResearch Results:")
     print("Keywords:", results["keywords"])
-    print("Articles analyzed:", len(results["articles"]))
-    print("\nFinal Summary:", results["summary"])
+    # print("Articles analyzed:", len(results["articles"]))
+    # print("\nFinal Summary:", results["summary"])
 
 
 if __name__ == "__main__":
