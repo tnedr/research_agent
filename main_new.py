@@ -19,9 +19,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-
-
-
 # Data Models
 class Article(BaseModel):
     title: str
@@ -63,37 +60,64 @@ class ResearchAgent(ABC):
 
 
 class KeywordAgent(ResearchAgent):
-    """Generates research keywords from the topic"""
-
     def __init__(self, llm: Any):
         super().__init__(llm)
-        self.system_prompt = """You are a research keyword specialist. 
-        Generate relevant academic keywords for the given research topic.
-        Consider both general and specific aspects of the topic.
-        Return keywords in order of relevance."""
+
+        self.tools = [{
+            "type": "function",
+            "function": {
+                "name": "generate_scholar_queries",
+                "description": "Generate Google Scholar search queries",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of search queries where each query is a space-separated combination of terms"
+                        }
+                    },
+                    "required": ["queries"]
+                }
+            }
+        }]
+
+        self.system_prompt = """You are a Google Scholar search specialist.
+        Generate effective search queries that will find the most relevant and highly-cited papers.
+        Each query should be 3-5 keywords separated by spaces."""
 
     def process(self, state: ResearchState) -> ResearchState:
-        prompt = f"""Generate research keywords for the topic: {state.topic}
-        Consider:
-        1. Main concepts
-        2. Related terms
-        3. Specific aspects
-        4. Methodology terms
+        prompt = f"""Generate Google Scholar search queries for the topic: {state.topic}
 
-        Return as a JSON list of strings."""
+        Create a list of search queries where each query combines 3-5 relevant terms with spaces.
+
+        Format example:
+        - "eggs cholesterol heart disease meta"
+        - "eggs cardiovascular health systematic review"
+
+        Important:
+        - Include methodological terms (meta-analysis, review, trial) for finding high-quality papers
+        - Focus on combinations that will find highly-cited papers
+        - Keep queries concise (3-5 terms) for best results
+        - Combine specific health outcomes with methodology terms"""
 
         messages = [
             SystemMessage(content=self.system_prompt),
             HumanMessage(content=prompt)
         ]
 
-        response = self.llm.invoke(messages)
-        keywords = json.loads(response.content)
+        llm_with_tools = self.llm.bind_tools(self.tools)
+        response = llm_with_tools.invoke(messages)
 
-        state.keywords = keywords
+        tool_call = response.tool_calls[0]
+        search_queries = tool_call["args"]["queries"]
+
+        state.keywords = search_queries
         state.current_step = "data_collection"
         state.needs_human_feedback = True
-        state.feedback_prompt = f"Please review these keywords: {keywords}\nAre they appropriate?"
+        state.feedback_prompt = "Please review these Google Scholar search queries:\n" + \
+                                "\n".join(f"- {q}" for q in search_queries) + \
+                                "\n\nAre these queries appropriate for finding relevant, highly-cited papers?"
 
         return state
 
@@ -338,28 +362,24 @@ class ResearchWorkflow:
 def main():
     # Configure LLMs for different agents
     llm_configs = {
-        "default": ChatOpenAI(
-        model="gpt-4o",
-        temperature=0,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-        # api_key="...",  # if you prefer to pass api key in directly instaed of using env vars
-        # base_url="...",
-        # organization="...",
-        # other params...
+        "default": ChatOpenAI(model="gpt-4o", temperature=0,
+                                max_tokens=None, timeout=None, max_retries=2,
+                                # api_key="...",  # if you prefer to pass api key in directly instaed of using env vars
+                                # base_url="...",
+                                # organization="...",
+                                # other params...
         ),
-        "keyword": ChatAnthropic(
-    model="claude-3-5-sonnet-20240620",
-    temperature=0,
-    max_tokens=1024,
-    timeout=None,
-    max_retries=2,
-    # other params...
-    ),
-
-
-
+        "keyword": ChatOpenAI(model="gpt-4o", temperature=0,
+                                max_tokens=None, timeout=None, max_retries=2,
+                                # api_key="...",  # if you prefer to pass api key in directly instaed of using env vars
+                                # base_url="...",
+                                # organization="...",
+                                # other params...
+        ),
+        "keyword2": ChatAnthropic(model="claude-3-5-sonnet-20240620", temperature=0,
+                                    max_tokens=1024, timeout=None, max_retries=2,
+                                # other params...
+        ),
         "analysis": ChatOpenAI(temperature=0.3),
         "summary": ChatAnthropic(
     model="claude-3-5-sonnet-20240620",
