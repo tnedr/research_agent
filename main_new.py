@@ -12,6 +12,7 @@ import os
 import pandas as pd
 from scholarly import scholarly
 import time
+import requests
 
 os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
@@ -227,7 +228,7 @@ class ScholarlyAgent(ResearchAgent):
             df.to_csv(state.temp_csv_path, index=False)
             print(f"Saved {len(df)} unique articles to {state.temp_csv_path}")
 
-    def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
+    def fetch_articlesOLD(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
         try:
             time.sleep(1)
@@ -245,8 +246,7 @@ class ScholarlyAgent(ResearchAgent):
                     url=result.get('eprint_url', 'N/A'),
                     citations=result.get('num_citations', 0),
                     publication_date=str(bib.get('pub_year')),
-                    source="Google Scholar",
-                    authors=", ".join(bib.get('author', []))  # Új mező kellene az Article class-ban
+                    source="Google Scholar"
                 )
                 articles.append(article)
                 print(f"Found: {article.title} ({article.publication_date}, {article.citations} citations)")
@@ -255,6 +255,48 @@ class ScholarlyAgent(ResearchAgent):
             print(f"Error searching for '{query}': {str(e)}")
 
         return articles
+
+    def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
+        articles = []
+        try:
+            url = "https://api.semanticscholar.org/graph/v1/paper/search"
+            params = {
+                "query": query,
+                "limit": max_results,
+                "fields": "title,abstract,url,authors,citationCount,publicationDate"
+            }
+            response = requests.get(url, params=params)
+
+            if response.status_code == 200:
+                results = response.json().get('data', [])
+
+                for item in results:
+
+                    # Process abstract for CSV format
+                    raw_abstract = item.get('abstract', 'N/A')
+                    if raw_abstract:
+                        # Remove newlines and excessive spaces, and truncate if too long
+                        processed_abstract = " ".join(raw_abstract.split()).strip()
+
+                    article = Article(
+                        title=item.get('title', 'N/A'),
+                        abstract=processed_abstract,
+                        url=item.get('url', 'N/A'),
+                        citations=item.get('citationCount', 0),
+                        publication_date=str(item.get('publicationDate', '0000'))[:4],
+                        source="Semantic Scholar"
+                    )
+                    articles.append(article)
+                    print(f"Found: {article.title} ({article.publication_date}, {article.citations} citations)")
+            else:
+                print(f"Error fetching data: {response.status_code}")
+
+        except Exception as e:
+            print(f"Error searching for '{query}': {str(e)}")
+
+        return articles
+
+
 
     def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
         print(f"\nFound {len(articles)} articles ({new_articles} new)")
