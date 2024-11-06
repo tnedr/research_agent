@@ -122,10 +122,6 @@ class ResearchAgent(ABC):
         """Determine if human feedback is needed"""
         return False
 
-    @abstractmethod
-    def get_conversation_config(self) -> Dict:
-        """Return agent-specific conversation configuration"""
-        pass
 
 
 class KeywordAgent(ResearchAgent):
@@ -149,29 +145,16 @@ class KeywordAgent(ResearchAgent):
                 }
             }
         }]
-
-    def get_conversation_config(self) -> Dict:
-        return {
-            "system_prompt": "You are a Google Scholar search specialist...",
-            "tools": self.tools,
-            "state_key": "keywords",
-            "tool_response_key": "queries",
-            "display_format": "{}",
-            "feedback_template": """Current queries: {current_state}
-User feedback: "{feedback}"
-
-Instructions:
-- If the user approves (saying ok, good, yes, etc), return the exact same queries to confirm
-- If the user wants changes, return the modified queries
-- ALWAYS return queries using the generate_scholar_queries tool
-- Never respond without using the tool
-
-Analyze the feedback and respond accordingly with the tool."""
-        }
+        self.system_prompt = """You are a Google Scholar search specialist with conversation skills.
+        When receiving feedback:
+        - If the user approves (ok, good, yes), return the exact same queries to confirm
+        - If they request changes, modify the queries accordingly
+        - ALWAYS use the generate_scholar_queries tool to respond
+        - Maintain a helpful, conversational tone"""
 
     def process(self, state: ResearchState) -> ResearchState:
-        prompt = f"""Generate academic search queries for: {state.topic}
-
+        # Initial query generation
+        initial_prompt = f"""Generate academic search queries for: {state.topic}
         Create effective queries that will find highly-cited papers.
         Each query should combine 3-5 terms with methodology terms.
 
@@ -185,21 +168,58 @@ Analyze the feedback and respond accordingly with the tool."""
         - Key concepts and variables"""
 
         messages = [
-            SystemMessage(content=self.get_conversation_config()["system_prompt"]),
-            HumanMessage(content=prompt)
+            SystemMessage(content=self.system_prompt),
+            HumanMessage(content=initial_prompt)
         ]
 
         llm_with_tools = self.llm.bind_tools(self.tools)
         response = llm_with_tools.invoke(messages)
 
-        tool_call = response.tool_calls[0]
-        search_queries = tool_call["args"]["queries"] # q miert hihvjak queriesnek
-        state.keywords = search_queries
-        state.current_step = "keyword"
-        state.needs_human_feedback = True
-        state.feedback_prompt = "\nHere are the suggested search queries:\n" + \
-                                "\n".join(f"- {q}" for q in search_queries) + \
-                                "\n\nWhat do you think about these queries? Feel free to suggest any changes."
+        # Set initial queries
+        state.keywords = response.tool_calls[0]["args"]["queries"]
+
+        # Handle feedback loop
+        while True:
+            # Display current queries in a conversational way
+            print("\nI've generated these search queries for your topic:")
+            for q in state.keywords:
+                print(f"- {q}")
+            print("\nWhat do you think about these? Feel free to suggest any changes, or say 'ok' if they look good.")
+
+            feedback = input("\nYour feedback: ").strip()
+
+            # Process feedback with conversation
+            feedback_prompt = f"""Current search queries: {state.keywords}
+
+            User feedback: "{feedback}"
+
+            Instructions:
+            - If the user approves (saying ok, good, yes), return the exact same queries to confirm
+            - If they want changes, analyze their feedback and modify the queries
+            - ALWAYS return queries using the generate_scholar_queries tool
+            - Respond conversationally but keep focus on the academic search task
+
+            Analyze the feedback and respond with appropriate queries."""
+
+            messages = [
+                SystemMessage(content=self.system_prompt),
+                HumanMessage(content=feedback_prompt)
+            ]
+
+            response = llm_with_tools.invoke(messages)
+            new_queries = response.tool_calls[0]["args"]["queries"]
+
+            # Check if queries are unchanged (user approved) or modified
+            if new_queries == state.keywords:
+                print("\nI understand you're satisfied with these queries. Moving forward!")
+                state.current_step = "complete"
+                break
+            else:
+                print("\nBased on your feedback, I've modified the queries to:")
+                state.keywords = new_queries
+                for q in state.keywords:
+                    print(f"- {q}")
+                print("\nHow do these look now?")
 
         return state
 
@@ -380,60 +400,9 @@ class ResearchWorkflow:
         # workflow.add_node("summary", self.agents["summary"].process)
 
         # Define edges
-        workflow.add_edge(START, "keyword")  # start node-ból indulunk
-        # workflow.add_edge("keyword", "collector")
-        # workflow.add_edge("collector", "ranking")
-        # workflow.add_edge("ranking", "download")
-        # workflow.add_edge("download", "analysis")
-        # workflow.add_edge("analysis", "summary")
-        workflow.add_edge("keyword", END)  # és end node-ba érkezünk
+        workflow.add_edge(START, "keyword")
+        workflow.add_edge("keyword", END)
         return workflow.compile()
-
-    def _get_human_feedback(self) -> None:
-        """Natural conversation-based human feedback"""
-        current_agent = self.agents[self.state.current_step]
-        config = current_agent.get_conversation_config()
-
-        print(self.state.feedback_prompt)
-
-        while True:
-            feedback = input("\nYour feedback: ").strip()
-
-            # Get current state and prepare for conversation
-            current_state = getattr(self.state, config["state_key"])
-            conversation_prompt = config["feedback_template"].format(
-                feedback=feedback,
-                current_state=current_state
-            )
-
-            messages = [
-                SystemMessage(content=config["system_prompt"]),
-                HumanMessage(content=conversation_prompt)
-            ]
-
-            llm_with_tools = current_agent.llm.bind_tools(config["tools"])
-            response = llm_with_tools.invoke(messages)
-
-            tool_call = response.tool_calls[0]
-            proposed_results = tool_call["args"]["queries"]
-
-            if isinstance(proposed_results, list) and proposed_results:
-                if str(proposed_results[0]).startswith("REJECTED:"):
-                    print(
-                        "\nI understand you want changes. Please provide more specific feedback about what you'd like to modify.")
-                    continue
-
-                if proposed_results == current_state:
-                    print("\nI understand you're happy with these results. Let's continue.")
-                    self.state.needs_human_feedback = False
-                    self.state.current_step = "complete"
-                    break
-                else:
-                    print("\nBased on your feedback, I've modified the queries:")
-                    for i, result in enumerate(proposed_results, 1):
-                        print(f"{i}. {result}")
-
-                    setattr(self.state, config["state_key"], proposed_results)
 
     def run(self, topic: str) -> Dict[str, Any]:
         """Run the research workflow"""
@@ -443,17 +412,8 @@ class ResearchWorkflow:
             # Initialize state
             self.state = ResearchState(topic=topic)
 
-            while self.state.current_step != "complete":
-                # Process current step
-                self.state = self.workflow.invoke(self.state)
-
-                # Handle human feedback if needed
-                if self.state.needs_human_feedback:
-                    self._get_human_feedback()
-
-                # Ha a current_step complete, akkor kilépünk
-                if self.state.current_step == "complete":
-                    break
+            # Process workflow - each agent handles its own feedback
+            self.state = self.workflow.invoke(self.state)
 
             return {
                 "topic": self.state.topic,
