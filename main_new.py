@@ -190,7 +190,7 @@ class ScholarlyAgent(ResearchAgent):
         return state
 
 
-    def fetch_articles(self, query: str, max_results: int = 10) -> List[Article]:
+    def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
         try:
             search_query = scholarly.search_pubs(query)
@@ -218,23 +218,42 @@ class ScholarlyAgent(ResearchAgent):
 
         return articles
 
-
     def update_csv(self, state: ResearchState):
-        """Update CSV with all articles"""
-        df = pd.DataFrame([
-            {
-                'Title': art.title,
-                'Abstract': art.abstract,
-                'Citations': art.citations,
-                'Year': art.publication_date,
-                'URL': art.url,
-                'Source Query': query
-            }
-            for query, articles in state.articles_by_query.items()
-            for art in articles
-        ])
-        df.to_csv(state.temp_csv_path, index=False)
-        print(f"\nUpdated article collection saved to {state.temp_csv_path}")
+        """Update CSV with all articles, sorted by citations and year"""
+        # Collect all articles with their source queries
+        records = []
+        for query, articles in state.articles_by_query.items():
+            for art in articles:
+                records.append({
+                    'Citations': art.citations or 0,  # Handle None values
+                    'Year': art.publication_date,  # Handle None values
+                    'Title': art.title,
+                    'Abstract': art.abstract,
+                    'URL': art.url,
+                    'Source Query': query
+                })
+
+        # Create DataFrame and sort
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.sort_values(
+                by=['Citations', 'Year'],
+                ascending=[False, False]
+            )
+
+            # Ensure column order
+            columns = ['Citations', 'Year', 'Title', 'Abstract', 'URL', 'Source Query']
+            df = df[columns]
+
+            # Save to CSV
+            df.to_csv(state.temp_csv_path, index=False)
+            print(f"\nSaved {len(df)} articles to {state.temp_csv_path}, sorted by citations and year")
+
+            # Show top 5 entries from CSV for verification
+            print("\nTop 5 articles in CSV:")
+            top_5 = df.head()
+            for _, row in top_5.iterrows():
+                print(f"[{row['Citations']} citations, {row['Year']}] {row['Title']}")
 
 
     def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
