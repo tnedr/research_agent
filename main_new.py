@@ -156,8 +156,6 @@ class ScholarlyAgent(ResearchAgent):
         self.max_results = 10
 
 
-
-
     def process(self, state: ResearchState) -> ResearchState:
         print(f"\nI'll now search for articles using the {len(state.keywords)} queries we have.")
         print("After each query, I'll show you what I found.\n")
@@ -178,7 +176,7 @@ class ScholarlyAgent(ResearchAgent):
                     new_articles += 1
 
             # Show results
-sh            self._show_results(articles, new_articles, state)
+            self._show_results(articles, new_articles, state)
             self.update_csv(state)
 
             if i < len(state.keywords):
@@ -256,6 +254,25 @@ sh            self._show_results(articles, new_articles, state)
         )
         for i, art in enumerate(sorted_articles[:10], 1):
             print(f"{i}. [{art.citations} citations] {art.title}")
+
+
+
+class AgentTester:
+    @staticmethod
+    def test_keyword_agent(topic: str, llm_config: Dict):
+        agent = KeywordAgent(llm_config)
+        state = ResearchState(topic=topic)
+        return agent.process(state)
+
+    @staticmethod
+    def test_scholarly_agent(keywords: List[str]):
+        agent = ScholarlyAgent(None)
+        state = ResearchState(
+            topic="Test Topic",
+            keywords=keywords
+        )
+        return agent.process(state)
+
 
 
 class ResearchWorkflow:
@@ -337,5 +354,41 @@ def main():
     # print("\nFinal Summary:", results["summary"])
 
 
+
+def main_test():
+    # Test configs
+    llm_configs = {
+        "default": ChatOpenAI(model="gpt-4", temperature=0)
+    }
+
+    # Test KeywordAgent
+    # print("Testing KeywordAgent...")
+    # keyword_result = AgentTester.test_keyword_agent(
+    #     "Health effects of eggs on cardiovascular health",
+    #     llm_configs["default"]
+    # )
+    # print("\nGenerated keywords:", keyword_result.keywords)
+
+    # Test ScholarlyAgent
+    print("\nTesting ScholarlyAgent...")
+    test_keywords = [
+        "eggs cardiovascular health meta-analysis",
+        "eggs cholesterol heart disease review"
+    ]
+    scholarly_result = AgentTester.test_scholarly_agent(test_keywords)
+
+    # Inspect results
+    print(f"\nCollected {len(scholarly_result.all_articles)} unique articles")
+    print("\nTop articles:")
+    sorted_articles = sorted(
+        scholarly_result.all_articles.values(),
+        key=lambda x: x.citations or 0,
+        reverse=True
+    )
+    for i, art in enumerate(sorted_articles[:5], 1):
+        print(f"{i}. [{art.citations} citations] {art.title}")
+
+
 if __name__ == "__main__":
+    main_test()
     main()
