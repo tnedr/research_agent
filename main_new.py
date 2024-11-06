@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import os
 import pandas as pd
 from scholarly import scholarly
+import time
 
 os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
@@ -229,6 +230,7 @@ class ScholarlyAgent(ResearchAgent):
     def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
         try:
+            time.sleep(1)
             search_query = scholarly.search_pubs(query)
             print(f"\nSearching for: '{query}'")
 
@@ -347,7 +349,6 @@ def test_keyword_agent():
     agent = KeywordAgent(llm)
     result_state = agent.process(state)
 
-
     print("\nGenerated keywords:", result_state.keywords)
 
     return result_state.keywords
@@ -370,6 +371,41 @@ def test_scholarly_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
+
+
+def test_workflow():
+    # Configure LLMs for different agents
+    llm_configs = {
+        "default": ChatOpenAI(model="gpt-4", temperature=0),
+        "keyword": ChatOpenAI(model="gpt-4", temperature=0)
+    }
+
+    # Define the test topic
+    test_topic = "Health effects of eggs on cardiovascular health"
+
+    # Initialize the workflow
+    workflow = ResearchWorkflow(llm_configs)
+
+    # Run the workflow with the test topic
+    print(f"\nRunning workflow test for topic: '{test_topic}'")
+    results = workflow.run(test_topic)
+
+    # Print out the results
+    print("\nTest Workflow Results:")
+    print("Keywords generated:", results["keywords"])
+
+    # If article data is available (make sure to uncomment it in `ResearchWorkflow`):
+    if "articles" in results:
+        print("\nArticles Summary:")
+        for i, article in enumerate(results["articles"], 1):
+            print(f"{i}. {article['title']} ({article['citations']} citations)")
+            print(f"   URL: {article['url']}")
+            print(f"   Abstract: {article['abstract'][:200]}...")  # Print first 200 characters of abstract
+
+test_workflow()
+import sys
+sys.exit()
+
 
 
 def main():
