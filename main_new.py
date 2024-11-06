@@ -123,7 +123,6 @@ class ResearchAgent(ABC):
         return False
 
 
-
 class KeywordAgent(ResearchAgent):
     def __init__(self, llm: Any):
         super().__init__(llm)
@@ -146,26 +145,26 @@ class KeywordAgent(ResearchAgent):
             }
         }]
         self.system_prompt = """You are a Google Scholar search specialist with conversation skills.
-        When receiving feedback:
-        - If the user approves (ok, good, yes), return the exact same queries to confirm
-        - If they request changes, modify the queries accordingly
-        - ALWAYS use the generate_scholar_queries tool to respond
-        - Maintain a helpful, conversational tone"""
+       When receiving feedback:
+       - If the user approves (ok, good, yes), return the exact same queries to confirm
+       - If they request changes, modify the queries accordingly
+       - ALWAYS use the generate_scholar_queries tool to respond
+       - Maintain a helpful, conversational tone"""
 
     def process(self, state: ResearchState) -> ResearchState:
         # Initial query generation
         initial_prompt = f"""Generate academic search queries for: {state.topic}
-        Create effective queries that will find highly-cited papers.
-        Each query should combine 3-5 terms with methodology terms.
+       Create effective queries that will find highly-cited papers.
+       Each query should combine 3-5 terms with methodology terms.
 
-        Example format:
-        - "eggs cholesterol heart disease meta"
-        - "eggs cardiovascular health systematic review"
+       Example format:
+       - "eggs cholesterol heart disease meta"
+       - "eggs cardiovascular health systematic review"
 
-        Include:
-        - Methodological terms (meta-analysis, review, trial)
-        - Specific health outcomes
-        - Key concepts and variables"""
+       Include:
+       - Methodological terms (meta-analysis, review, trial)
+       - Specific health outcomes
+       - Key concepts and variables"""
 
         messages = [
             SystemMessage(content=self.system_prompt),
@@ -178,28 +177,28 @@ class KeywordAgent(ResearchAgent):
         # Set initial queries
         state.keywords = response.tool_calls[0]["args"]["queries"]
 
+        # Show initial queries
+        print("\nI've generated these search queries for your topic:")
+        for q in state.keywords:
+            print(f"- {q}")
+        print("\nWhat do you think about these? Feel free to suggest any changes, or say 'ok' if they look good.")
+
         # Handle feedback loop
         while True:
-            # Display current queries in a conversational way
-            print("\nI've generated these search queries for your topic:")
-            for q in state.keywords:
-                print(f"- {q}")
-            print("\nWhat do you think about these? Feel free to suggest any changes, or say 'ok' if they look good.")
-
             feedback = input("\nYour feedback: ").strip()
 
             # Process feedback with conversation
             feedback_prompt = f"""Current search queries: {state.keywords}
 
-            User feedback: "{feedback}"
+           User feedback: "{feedback}"
 
-            Instructions:
-            - If the user approves (saying ok, good, yes), return the exact same queries to confirm
-            - If they want changes, analyze their feedback and modify the queries
-            - ALWAYS return queries using the generate_scholar_queries tool
-            - Respond conversationally but keep focus on the academic search task
+           Instructions:
+           - If the user approves (saying ok, good, yes), return the exact same queries to confirm
+           - If they want changes, analyze their feedback and modify the queries
+           - ALWAYS return queries using the generate_scholar_queries tool
+           - Respond conversationally but keep focus on the academic search task
 
-            Analyze the feedback and respond with appropriate queries."""
+           Analyze the feedback and respond with appropriate queries."""
 
             messages = [
                 SystemMessage(content=self.system_prompt),
