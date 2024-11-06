@@ -155,10 +155,15 @@ class ScholarlyAgent(ResearchAgent):
         super().__init__(llm)
         self.max_results = 10
 
+    def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
+        print(f"\nFound {len(articles)} articles ({new_articles} new)")
+        # CSV update azonnal
+        self.update_csv(state)
+
 
     def process(self, state: ResearchState) -> ResearchState:
-        print(f"\nI'll now search for articles using the {len(state.keywords)} queries we have.")
-        print("After each query, I'll show you what I found.\n")
+        print(f"\nI'll now search for articles using the {len(state.keywords)} queries.")
+        total_new = 0
 
         for i, query in enumerate(state.keywords, 1):
             print(f"\nQuery {i}/{len(state.keywords)}: '{query}'")
@@ -174,21 +179,52 @@ class ScholarlyAgent(ResearchAgent):
                         article.citations > state.all_articles[article.title].citations:
                     state.all_articles[article.title] = article
                     new_articles += 1
+            total_new += new_articles
 
-            # Show results
-            self._show_results(articles, new_articles, state)
-            self.update_csv(state)
+            # Show minimal results
+            print(f"\nFound {len(articles)} articles ({new_articles} new)")
 
-            if i < len(state.keywords):
-                print("\nShould I continue with the next query?")
-                choice = input("(yes/no/show all): ").strip().lower()
-                if choice == 'no':
-                    break
-                elif choice == 'show all':
-                    self._show_all_articles(state)
+        # A végén egyszer írjuk ki a CSV-t az összes unique cikkel
+        self.update_csv(state)
+        print(f"\nTotal unique articles collected: {len(state.all_articles)}")
 
         return state
 
+    def update_csv(self, state: ResearchState):
+        """Update CSV with unique articles, sorted by citations and year"""
+        # Use unique articles from state.all_articles
+        records = []
+        for article in state.all_articles.values():
+            # Find which queries found this article
+            queries = []
+            for query, articles in state.articles_by_query.items():
+                if any(a.title == article.title for a in articles):
+                    queries.append(query)
+
+            records.append({
+                'Citations': article.citations or 0,
+                'Year': article.publication_date,
+                'Title': article.title,
+                'Abstract': article.abstract,
+                'URL': article.url,
+                'Source Query': '; '.join(queries)  # All queries that found this article
+            })
+
+        # Create DataFrame and sort
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.sort_values(
+                by=['Citations', 'Year'],
+                ascending=[False, False]
+            )
+
+            # Ensure column order
+            columns = ['Citations', 'Year', 'Title', 'Abstract', 'URL', 'Source Query']
+            df = df[columns]
+
+            # Save to CSV
+            df.to_csv(state.temp_csv_path, index=False)
+            print(f"Saved {len(df)} unique articles to {state.temp_csv_path}")
 
     def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
@@ -218,44 +254,6 @@ class ScholarlyAgent(ResearchAgent):
 
         return articles
 
-    def update_csv(self, state: ResearchState):
-        """Update CSV with all articles, sorted by citations and year"""
-        # Collect all articles with their source queries
-        records = []
-        for query, articles in state.articles_by_query.items():
-            for art in articles:
-                records.append({
-                    'Citations': art.citations or 0,  # Handle None values
-                    'Year': art.publication_date,  # Handle None values
-                    'Title': art.title,
-                    'Abstract': art.abstract,
-                    'URL': art.url,
-                    'Source Query': query
-                })
-
-        # Create DataFrame and sort
-        df = pd.DataFrame(records)
-        if not df.empty:
-            df = df.sort_values(
-                by=['Citations', 'Year'],
-                ascending=[False, False]
-            )
-
-            # Ensure column order
-            columns = ['Citations', 'Year', 'Title', 'Abstract', 'URL', 'Source Query']
-            df = df[columns]
-
-            # Save to CSV
-            df.to_csv(state.temp_csv_path, index=False)
-            print(f"\nSaved {len(df)} articles to {state.temp_csv_path}, sorted by citations and year")
-
-            # Show top 5 entries from CSV for verification
-            print("\nTop 5 articles in CSV:")
-            top_5 = df.head()
-            for _, row in top_5.iterrows():
-                print(f"[{row['Citations']} citations, {row['Year']}] {row['Title']}")
-
-
     def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
         print(f"\nFound {len(articles)} articles ({new_articles} new)")
         print("\nTop articles from this search:")
@@ -275,25 +273,6 @@ class ScholarlyAgent(ResearchAgent):
             print(f"{i}. [{art.citations} citations] {art.title}")
 
 
-
-class AgentTester:
-    @staticmethod
-    def test_keyword_agent(topic: str, llm_config: Dict):
-        agent = KeywordAgent(llm_config)
-        state = ResearchState(topic=topic)
-        return agent.process(state)
-
-    @staticmethod
-    def test_scholarly_agent(keywords: List[str]):
-        agent = ScholarlyAgent(None)
-        state = ResearchState(
-            topic="Test Topic",
-            keywords=keywords
-        )
-        return agent.process(state)
-
-
-
 class ResearchWorkflow:
     """Manages the multi-agent research workflow"""
 
@@ -305,6 +284,13 @@ class ResearchWorkflow:
 
         self.workflow = self._build_workflow()
         self.state = None
+
+    def _generate_session_filename(self, topic: str) -> str:
+        """Generate unique filename for this research session"""
+        # Clean topic for filename
+        clean_topic = "".join(x for x in topic if x.isalnum() or x in "_ ").replace(" ", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"research_results_{clean_topic}_{timestamp}.csv"
 
     def _build_workflow(self) -> MessageGraph:
         """Build the workflow graph"""
@@ -323,8 +309,12 @@ class ResearchWorkflow:
         try:
             print(f"Starting research on: {topic}")
 
-            # Initialize state
-            self.state = ResearchState(topic=topic)
+            # Initialize state with unique CSV path
+            self.state = ResearchState(
+                topic=topic,
+                temp_csv_path=self._generate_session_filename(topic)
+            )
+            print(f"Results will be saved to: {self.state.temp_csv_path}")
 
             # Process workflow - each agent handles its own feedback
             self.state = self.workflow.invoke(self.state)
@@ -339,6 +329,47 @@ class ResearchWorkflow:
         except Exception as e:
             print(f"Error in workflow: {str(e)}")
             raise
+
+
+def test_keyword_agent():
+    print("Keyword Agent Test")
+    # Configure LLM
+    llm = ChatOpenAI(model="gpt-4", temperature=0)
+    # Initialize with a test topic
+    topic = "Health effects of eggs on cardiovascular health"
+    print(f"\nTesting keyword generation for topic: {topic}")
+
+    print("Testing KeywordAgent...")
+
+    state = ResearchState(
+        topic=topic
+    )
+    agent = KeywordAgent(llm)
+    result_state = agent.process(state)
+
+
+    print("\nGenerated keywords:", result_state.keywords)
+
+    return result_state.keywords
+
+
+def test_scholarly_agent():
+    print("Scholarly Agent Interactive Test")
+
+    keywords = ["eggs cardiovascular health meta-analysis",
+                "eggs cholesterol heart disease review"]
+
+    filename = 'test1_results.csv'
+    state = ResearchState(
+        topic="Interactive Test",
+        keywords=keywords,
+        temp_csv_path=filename
+    )
+
+    agent = ScholarlyAgent(None)
+    result_state = agent.process(state)
+
+    print(f"\nResults written to: {result_state.temp_csv_path}")
 
 
 def main():
@@ -374,40 +405,7 @@ def main():
 
 
 
-def main_test():
-    # Test configs
-    llm_configs = {
-        "default": ChatOpenAI(model="gpt-4", temperature=0)
-    }
-
-    # Test KeywordAgent
-    # print("Testing KeywordAgent...")
-    # keyword_result = AgentTester.test_keyword_agent(
-    #     "Health effects of eggs on cardiovascular health",
-    #     llm_configs["default"]
-    # )
-    # print("\nGenerated keywords:", keyword_result.keywords)
-
-    # Test ScholarlyAgent
-    print("\nTesting ScholarlyAgent...")
-    test_keywords = [
-        "eggs cardiovascular health meta-analysis",
-        "eggs cholesterol heart disease review"
-    ]
-    scholarly_result = AgentTester.test_scholarly_agent(test_keywords)
-
-    # Inspect results
-    print(f"\nCollected {len(scholarly_result.all_articles)} unique articles")
-    print("\nTop articles:")
-    sorted_articles = sorted(
-        scholarly_result.all_articles.values(),
-        key=lambda x: x.citations or 0,
-        reverse=True
-    )
-    for i, art in enumerate(sorted_articles[:5], 1):
-        print(f"{i}. [{art.citations} citations] {art.title}")
-
-
 if __name__ == "__main__":
-    main_test()
-    main()
+    test_keyword_agent()
+    # test_scholarly_agent()
+    # main()
