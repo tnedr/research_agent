@@ -193,8 +193,7 @@ Analyze the feedback and respond accordingly with the tool."""
         response = llm_with_tools.invoke(messages)
 
         tool_call = response.tool_calls[0]
-        search_queries = tool_call["args"]["queries"]
-
+        search_queries = tool_call["args"]["queries"] # q miert hihvjak queriesnek
         state.keywords = search_queries
         state.current_step = "keyword"
         state.needs_human_feedback = True
