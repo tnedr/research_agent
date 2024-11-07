@@ -597,6 +597,7 @@ class FilterRankAgent(ResearchAgent):
             # Content
             'key_findings',
             'Abstract',
+            'TLDR',
             'URL',
             'Source Query'
         ]
@@ -763,14 +764,14 @@ def test_scholarly_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
-test_scholarly_agent()
-import sys
-sys.exit()
+# test_scholarly_agent()
+# import sys
+# sys.exit()
 
 def test_filter_rank_agent():
     print("FilterRank Agent Test")
 
-    input_csv = 'research_results_Health_effects_of_eggs_on_cardiovascular_health_20241106_212158.csv'
+    input_csv = 'test1_results_used.csv'
 
     state = ResearchState(
         topic="Health effects of eggs on cardiovascular health",
