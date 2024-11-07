@@ -14,6 +14,7 @@ from scholarly import scholarly
 import time
 import requests
 import json
+from typing import List
 
 os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
@@ -194,14 +195,17 @@ class PublicationSearchAgent(ResearchAgent):
             # Update unique articles
             new_articles = 0
             for article in articles:
-                if article.title not in state.all_articles or \
-                        article.citations > state.all_articles[article.title].citations:
+                # if article.title not in state.all_articles or \
+                #         article.citations > state.all_articles[article.title].citations:
+                if article.title not in state.all_articles:
                     state.all_articles[article.title] = article
                     new_articles += 1
+                else:
+                    print('Skipping article, already exist:', article.title)
             total_new += new_articles
 
             # Show minimal results
-            print(f"\nFound {len(articles)} articles ({new_articles} new)")
+            print(f"\nFound {len(articles)} articles with data (among them {new_articles} new)")
 
         # A végén egyszer írjuk ki a CSV-t az összes unique cikkel
         self.update_csv(state)
@@ -247,96 +251,88 @@ class PublicationSearchAgent(ResearchAgent):
             df.to_csv(state.temp_csv_path, index=False)
             print(f"Saved {len(df)} unique articles to {state.temp_csv_path}")
 
-    def fetch_articlesOLD(self, query: str, max_results: int = 20) -> List[Article]:
-        articles = []
-        try:
-            time.sleep(1)
-            search_query = scholarly.search_pubs(query)
-            print(f"\nSearching for: '{query}'")
-
-            for i, result in enumerate(search_query):
-                if i >= max_results:
-                    break
-
-                bib = result.get('bib', {})
-                article = Article(
-                    title=bib.get('title', 'N/A'),
-                    abstract=bib.get('abstract', 'N/A'),
-                    url=result.get('eprint_url', 'N/A'),
-                    citations=result.get('num_citations', 0),
-                    influential_citations=0,
-                    publication_year=str(bib.get('pub_year')),
-                    source="Google Scholar"
-                )
-                articles.append(article)
-                print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
-
-        except Exception as e:
-            print(f"Error searching for '{query}': {str(e)}")
-
-        return articles
-
     def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
+
+        articles = []
+        retries = 5  # Maximum retry attempts
+        backoff_factor = 2  # Factor for exponential backoff (1s, 2s, 4s, etc.)
+        delay = 1  # Initial delay in seconds
+
         try:
-            url = "https://api.semanticscholar.org/graph/v1/paper/search"
-            params = {
-                "query": query,
-                "limit": max_results,
-                # https://api.semanticscholar.org/api-docs#tag/Paper-Data/operation/post_graph_get_papers
-                "fields": "title,tldr,abstract,url,venue,authors,citationCount,influentialCitationCount,publicationDate,year,isOpenAccess,openAccessPdf"
-            }
-            response = requests.get(url, params=params)
+            for attempt in range(retries):
 
-            if response.status_code == 200:
-                results = response.json().get('data', [])
+                try:
+                    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                    params = {
+                        "query": query,
+                        "limit": max_results,
+                        # https://api.semanticscholar.org/api-docs#tag/Paper-Data/operation/post_graph_get_papers
+                        "fields": "title,tldr,abstract,url,venue,authors,citationCount,influentialCitationCount,publicationDate,year,isOpenAccess,openAccessPdf"
+                    }
+                    response = requests.get(url, params=params)
 
-                for bib in results:
-                    # Ellenőrizzük, hogy minden szükséges mező megvan-e
-                    raw_title = bib.get('title')
-                    raw_abstract = bib.get('abstract')
-                    raw_tldr = bib.get('tldr')
-                    raw_url = bib.get('url')
-                    raw_authors = bib.get('authors')
-                    raw_citations = bib.get('citationCount')
-                    raw_influential_citations = bib.get('influentialCitationCount') # todo implement this
-                    raw_year = bib.get('year')
+                    if response.status_code == 200:
+                        results = response.json().get('data', [])
 
-                    # Csak akkor dolgozzuk fel, ha minden mező létezik és nem None
-                    if raw_title and (raw_abstract or raw_tldr) and raw_url and raw_citations is not None:
-                        if raw_year is None:
-                            raw_year = 1900
-                        # Process abstract for CSV format
-                        if raw_abstract is None:
-                            processed_abstract = 'None'
-                        else:
-                            processed_abstract = " ".join(raw_abstract.split()).strip()
-                        if raw_tldr is None:
-                            processed_tldr = 'None'
-                        else:
-                            processed_tldr = raw_tldr['text']
-                        if raw_influential_citations is None:
-                            raw_influential_citations = 0
-                        processed_authors = ', '.join([author['name'] for author in raw_authors])
+                        for bib in results:
+                            # Ellenőrizzük, hogy minden szükséges mező megvan-e
+                            raw_title = bib.get('title')
+                            raw_abstract = bib.get('abstract')
+                            raw_tldr = bib.get('tldr')
+                            raw_url = bib.get('url')
+                            raw_authors = bib.get('authors')
+                            raw_citations = bib.get('citationCount')
+                            raw_influential_citations = bib.get('influentialCitationCount') # todo implement this
+                            raw_year = bib.get('year')
 
-                        article = Article(
-                            title=raw_title,
-                            authors=processed_authors,
-                            abstract=processed_abstract,
-                            tldr=processed_tldr,
-                            url=raw_url,
-                            citations=raw_citations,
-                            influential_citations=raw_influential_citations,
-                            publication_year=raw_year,
-                            source="Google Scholar"
-                        )
-                        articles.append(article)
-                        print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
+                            # Csak akkor dolgozzuk fel, ha minden mező létezik és nem None
+                            if raw_title and (raw_abstract or raw_tldr) and raw_url and raw_citations is not None:
+                                if raw_year is None:
+                                    raw_year = 1900
+                                # Process abstract for CSV format
+                                if raw_abstract is None:
+                                    processed_abstract = 'None'
+                                else:
+                                    processed_abstract = " ".join(raw_abstract.split()).strip()
+                                if raw_tldr is None:
+                                    processed_tldr = 'None'
+                                else:
+                                    processed_tldr = raw_tldr['text']
+                                if raw_influential_citations is None:
+                                    raw_influential_citations = 0
+                                processed_authors = ', '.join([author['name'] for author in raw_authors])
+
+                                article = Article(
+                                    title=raw_title,
+                                    authors=processed_authors,
+                                    abstract=processed_abstract,
+                                    tldr=processed_tldr,
+                                    url=raw_url,
+                                    citations=raw_citations,
+                                    influential_citations=raw_influential_citations,
+                                    publication_year=raw_year,
+                                    source="Google Scholar"
+                                )
+                                articles.append(article)
+                                print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
+                            else:
+                                print(f"Skipping article due to missing fields: {bib}")
+
+                        return articles
+
+                    elif response.status_code == 429:
+                        print(f"Error 429: Too many requests. Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        delay *= backoff_factor  # Increase delay for the next retry
+
                     else:
-                        print(f"Skipping article due to missing fields: {bib}")
+                        print(f"Error fetching data: {response.status_code}")
+                        break  # Break loop if it's a different error
 
-            else:
-                print(f"Error fetching data: {response.status_code}")
+                except requests.exceptions.RequestException as e:
+                    print(f"Request error: {str(e)}")
+                    break  # Exit on network error
 
         except Exception as e:
             print(f"Error searching for '{query}': {str(e)}")
@@ -764,9 +760,9 @@ def test_publication_search_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
-# test_scholarly_agent()
-# import sys
-# sys.exit()
+test_publication_search_agent()
+import sys
+sys.exit()
 
 def test_filter_rank_agent():
     print("FilterRank Agent Test")
