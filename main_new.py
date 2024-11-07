@@ -71,6 +71,9 @@ class ResearchAgent(ABC):
 
 
 class KeywordAgent(ResearchAgent):
+    # todo lehetne beletenni olyant, hogy a finding vagy a search alapjan uj keywordoket javasol
+    # az nagyon tuti lenne, ekkor folyamatosan novekednne az eselye, hogy megtalalja a legjobb
+    # papirokat
     def __init__(self, llm: Any):
         super().__init__(llm)
         self.tools = [{
@@ -662,6 +665,311 @@ class FilterRankAgent(ResearchAgent):
         return state
 
 
+class ContentSynthesisAgent(ResearchAgent):
+    def __init__(self, llm: Any):
+        super().__init__(llm)
+        # Tool for structured synthesis output
+        self.tools = [{
+            "type": "function",
+            "function": {
+                "name": "synthesize_research_content",
+                "description": "Synthesize research content into main themes and findings",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "main_themes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "theme": {"type": "string"},
+                                    "description": {"type": "string"},
+                                    "key_findings": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    },
+                                    "related_papers": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                }
+                            },
+                            "description": "Main research themes identified"
+                        },
+                        "research_directions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Identified research directions and subfields"
+                        },
+                        "synthesis_summary": {
+                            "type": "string",
+                            "description": "Overall synthesis of the research findings"
+                        }
+                    },
+                    "required": ["main_themes", "research_directions", "synthesis_summary"]
+                }
+            }
+        }]
+
+    def process(self, state: ResearchState) -> ResearchState:
+        """Process the final filtered papers and create content synthesis"""
+        print("\nStarting content synthesis...")
+
+        # Load final filtered data
+        df = pd.read_csv(state.final_csv_path)
+
+        # Create synthesis file path
+        base, _ = os.path.splitext(state.final_csv_path)
+        synthesis_path = f"{base}_synthesis.md"
+
+        system_prompt = """You are a research synthesis specialist. Your task is to analyze research papers
+        and identify main themes, key findings, and research directions. Focus on:
+        1. Identifying core themes and how papers relate to them
+        2. Extracting and organizing key findings
+        3. Recognizing emerging research directions
+        Be thorough and organized in your analysis."""
+
+        # Prepare paper data for analysis
+        papers_data = []
+        for _, row in df.iterrows():
+            papers_data.append({
+                'title': row['Title'],
+                'tldr': row['TLDR'] if pd.notna(row['TLDR']) else None,
+                'abstract': row['Abstract'],
+                'key_findings': row['key_findings'],
+                'year': row['Year']
+            })
+
+        # Create analysis prompt
+        prompt = f"""Research topic: {state.topic}
+
+        Analyze these papers and synthesize their content into main themes and findings.
+        Focus on identifying core research themes, key findings, and future directions.
+
+        Papers to analyze:
+        {json.dumps(papers_data, indent=2)}
+
+        Create a thorough synthesis using the synthesize_research_content function."""
+
+        try:
+            # Get synthesis from LLM
+            llm_with_tools = self.llm.bind_tools(self.tools)
+            response = llm_with_tools.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt)
+            ])
+
+            # Get synthesis from tool call
+            synthesis = response.tool_calls[0]["args"]
+
+            # Create markdown content
+            markdown_content = self._create_markdown(synthesis, state.topic)
+
+            # Save synthesis
+            with open(synthesis_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+
+            print(f"\nContent synthesis complete!")
+            print(f"Results saved to: {synthesis_path}")
+
+            # Save path for next agent
+            state.synthesis_path = synthesis_path
+
+            return state
+
+        except Exception as e:
+            print(f"Error in content synthesis: {e}")
+            raise
+
+    def _create_markdown(self, synthesis: Dict, topic: str) -> str:
+        """Create markdown document from synthesis results"""
+        markdown = f"""# Research Synthesis: {topic}
+
+## Overview
+{synthesis['synthesis_summary']}
+
+## Main Research Themes
+"""
+        for theme in synthesis['main_themes']:
+            markdown += f"\n### {theme['theme']}\n"
+            markdown += f"{theme['description']}\n\n"
+            markdown += "Key Findings:\n"
+            for finding in theme['key_findings']:
+                markdown += f"- {finding}\n"
+            markdown += "\nRelevant Papers:\n"
+            for paper in theme['related_papers']:
+                markdown += f"- {paper}\n"
+
+        markdown += "\n## Research Directions\n"
+        for direction in synthesis['research_directions']:
+            markdown += f"- {direction}\n"
+
+        return markdown
+
+
+class EvidenceAnalysisAgent(ResearchAgent):
+    def __init__(self, llm: Any):
+        super().__init__(llm)
+        self.tools = [{
+            "type": "function",
+            "function": {
+                "name": "analyze_research_evidence",
+                "description": "Analyze research evidence, conflicts, and gaps",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "evidence_analysis": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "theme": {"type": "string"},
+                                    "consensus": {"type": "string"},
+                                    "conflicting_findings": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "finding": {"type": "string"},
+                                                "supporting_papers": {"type": "array", "items": {"type": "string"}},
+                                                "opposing_papers": {"type": "array", "items": {"type": "string"}},
+                                                "evidence_strength": {"type": "string"}
+                                            }
+                                        }
+                                    },
+                                    "research_gaps": {
+                                        "type": "array",
+                                        "items": {"type": "string"}
+                                    }
+                                }
+                            }
+                        },
+                        "methodology_assessment": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "paper_title": {"type": "string"},
+                                    "methodology_strength": {"type": "string"},
+                                    "limitations": {"type": "array", "items": {"type": "string"}}
+                                }
+                            }
+                        }
+                    },
+                    "required": ["evidence_analysis", "methodology_assessment"]
+                }
+            }
+        }]
+
+    def process(self, state: ResearchState) -> ResearchState:
+        """Analyze evidence and create detailed analysis"""
+        print("\nStarting evidence analysis...")
+
+        # Load both synthesis and original data
+        with open(state.synthesis_path, 'r', encoding='utf-8') as f:
+            synthesis_content = f.read()
+
+        df = pd.read_csv(state.final_csv_path)
+
+        # Create analysis file path
+        base, _ = os.path.splitext(state.final_csv_path)
+        analysis_path = f"{base}_evidence_analysis.md"
+
+        system_prompt = """You are a research evidence analyst specializing in:
+        1. Identifying consensus and conflicts in research findings
+        2. Evaluating strength of evidence
+        3. Assessing methodology quality
+        4. Identifying research gaps
+        Be critical and thorough in your analysis."""
+
+        # Prepare data for analysis
+        papers_data = []
+        for _, row in df.iterrows():
+            papers_data.append({
+                'title': row['Title'],
+                'abstract': row['Abstract'],
+                'key_findings': row['key_findings'],
+                'methodology_quality': row['methodology_quality'],
+                'findings_significance': row['findings_significance']
+            })
+
+        prompt = f"""Research topic: {state.topic}
+
+        Previous synthesis:
+        {synthesis_content}
+
+        Analyze the evidence in these papers:
+        {json.dumps(papers_data, indent=2)}
+
+        Focus on:
+        1. Identifying areas of consensus and conflict
+        2. Evaluating strength of evidence
+        3. Assessing methodology quality
+        4. Identifying research gaps
+
+        Use the analyze_research_evidence function for your analysis."""
+
+        try:
+            # Get analysis from LLM
+            llm_with_tools = self.llm.bind_tools(self.tools)
+            response = llm_with_tools.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt)
+            ])
+
+            # Get analysis from tool call
+            analysis = response.tool_calls[0]["args"]
+
+            # Create markdown content
+            markdown_content = self._create_markdown(analysis)
+
+            # Save analysis
+            with open(analysis_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
+
+            print(f"\nEvidence analysis complete!")
+            print(f"Results saved to: {analysis_path}")
+
+            return state
+
+        except Exception as e:
+            print(f"Error in evidence analysis: {e}")
+            raise
+
+    def _create_markdown(self, analysis: Dict) -> str:
+        """Create markdown document from analysis results"""
+        markdown = """# Evidence Analysis Report
+
+## Theme-based Analysis
+"""
+        for theme_analysis in analysis['evidence_analysis']:
+            markdown += f"\n### {theme_analysis['theme']}\n"
+            markdown += f"\nConsensus:\n{theme_analysis['consensus']}\n"
+
+            markdown += "\n#### Conflicting Findings\n"
+            for conflict in theme_analysis['conflicting_findings']:
+                markdown += f"\n**Finding**: {conflict['finding']}\n"
+                markdown += f"- Evidence Strength: {conflict['evidence_strength']}\n"
+                markdown += "- Supporting Papers:\n"
+                for paper in conflict['supporting_papers']:
+                    markdown += f"  - {paper}\n"
+                markdown += "- Opposing Papers:\n"
+                for paper in conflict['opposing_papers']:
+                    markdown += f"  - {paper}\n"
+
+            markdown += "\n#### Research Gaps\n"
+            for gap in theme_analysis['research_gaps']:
+                markdown += f"- {gap}\n"
+
+        markdown += "\n## Methodology Assessment\n"
+        for method in analysis['methodology_assessment']:
+            markdown += f"\n### {method['paper_title']}\n"
+            markdown += f"Strength: {method['methodology_strength']}\n"
+            markdown += "Limitations:\n"
+            for limitation in method['limitations']:
+                markdown += f"- {limitation}\n"
+
+        return markdown
 
 
 class ResearchWorkflow:
@@ -760,9 +1068,9 @@ def test_publication_search_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
-test_publication_search_agent()
-import sys
-sys.exit()
+# test_publication_search_agent()
+# import sys
+# sys.exit()
 
 def test_filter_rank_agent():
     print("FilterRank Agent Test")
@@ -791,12 +1099,42 @@ def test_filter_rank_agent():
     print(f"Final filtered articles: {len(final_df)}")
 
     return result_state
+# test_filter_rank_agent()
+# import sys
+# sys.exit()
 
-test_filter_rank_agent()
-import sys
-sys.exit()
+def test_synthesis_and_analysis():
+    print("Testing Content Synthesis and Evidence Analysis")
 
+    # Load test data
+    input_csv = 'research_results_Health_effects_of_eggs_on_cardiovascular_health_20241106_212158_final_filtered.csv'
 
+    # Initialize state
+    state = ResearchState(
+        topic="Health effects of eggs on cardiovascular health",
+        keywords=["eggs cardiovascular health meta-analysis",
+                  "eggs cholesterol heart disease review"],
+        temp_csv_path=input_csv,
+        final_csv_path=input_csv
+    )
+
+    # Initialize agents with LLM
+    llm = ChatOpenAI(model="gpt-4", temperature=0)
+
+    # 1. Run Content Synthesis
+    print("\nStep 1: Content Synthesis")
+    synthesis_agent = ContentSynthesisAgent(llm)
+    state = synthesis_agent.process(state)
+
+    # 2. Run Evidence Analysis
+    print("\nStep 2: Evidence Analysis")
+    analysis_agent = EvidenceAnalysisAgent(llm)
+    state = analysis_agent.process(state)
+
+    return state
+# test_synthesis_and_analysis()
+# import sys
+# sys.exit()
 
 def test_workflow():
     # Configure LLMs for different agents
@@ -826,11 +1164,9 @@ def test_workflow():
             print(f"{i}. {article['title']} ({article['citations']} citations)")
             print(f"   URL: {article['url']}")
             print(f"   Abstract: {article['abstract'][:200]}...")  # Print first 200 characters of abstract
-
-test_workflow()
-import sys
-sys.exit()
-
+# test_workflow()
+# import sys
+# sys.exit()
 
 
 def main():
@@ -867,6 +1203,6 @@ def main():
 
 
 if __name__ == "__main__":
-    test_keyword_agent()
+    # test_keyword_agent()
     # test_scholarly_agent()
     # main()
