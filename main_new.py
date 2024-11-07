@@ -22,10 +22,13 @@ load_dotenv()
 # Data Models
 class Article(BaseModel):
     title: str
+    authors: str
     abstract: Optional[str]
+    tldr: Optional[str]
     url: str
     citations: Optional[int]
-    publication_date: Optional[int]
+    influential_citations: Optional[int]
+    publication_year: Optional[int]
     source: str
 
 
@@ -219,9 +222,11 @@ class ScholarlyAgent(ResearchAgent):
 
             records.append({
                 'Citations': article.citations or 0,
-                'Year': article.publication_date,
+                'Year': article.publication_year,
                 'Title': article.title,
+                'Authors': article.authors,
                 'Abstract': article.abstract,
+                'TLDR': article.tldr,
                 'URL': article.url,
                 'Source Query': '; '.join(queries)  # All queries that found this article
             })
@@ -235,7 +240,7 @@ class ScholarlyAgent(ResearchAgent):
             )
 
             # Ensure column order
-            columns = ['Citations', 'Year', 'Title', 'Abstract', 'URL', 'Source Query']
+            columns = ['Citations', 'Year', 'Title', 'Authors', 'Abstract', 'TLDR', 'URL', 'Source Query']
             df = df[columns]
 
             # Save to CSV
@@ -259,11 +264,12 @@ class ScholarlyAgent(ResearchAgent):
                     abstract=bib.get('abstract', 'N/A'),
                     url=result.get('eprint_url', 'N/A'),
                     citations=result.get('num_citations', 0),
-                    publication_date=str(bib.get('pub_year')),
+                    influential_citations=0,
+                    publication_year=str(bib.get('pub_year')),
                     source="Google Scholar"
                 )
                 articles.append(article)
-                print(f"Found: {article.title} ({article.publication_date}, {article.citations} citations)")
+                print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
 
         except Exception as e:
             print(f"Error searching for '{query}': {str(e)}")
@@ -277,35 +283,58 @@ class ScholarlyAgent(ResearchAgent):
             params = {
                 "query": query,
                 "limit": max_results,
-                "fields": "title,abstract,url,authors,citationCount,publicationDate"
+                # https://api.semanticscholar.org/api-docs#tag/Paper-Data/operation/post_graph_get_papers
+                "fields": "title,tldr,abstract,url,venue,authors,citationCount,influentialCitationCount,publicationDate,year,isOpenAccess,openAccessPdf"
             }
             response = requests.get(url, params=params)
 
             if response.status_code == 200:
                 results = response.json().get('data', [])
 
-                for item in results:
-                    print(item.get('title'))
-                    # Process abstract for CSV format
-                    raw_abstract = item.get('abstract', 'N/A')
-                    if raw_abstract:
-                        # Remove newlines and excessive spaces, and truncate if too long
-                        processed_abstract = " ".join(raw_abstract.split()).strip()
+                for bib in results:
+                    # Ellenőrizzük, hogy minden szükséges mező megvan-e
+                    raw_title = bib.get('title')
+                    raw_abstract = bib.get('abstract')
+                    raw_tldr = bib.get('tldr')
+                    raw_url = bib.get('url')
+                    raw_authors = bib.get('authors')
+                    raw_citations = bib.get('citationCount')
+                    raw_influential_citations = bib.get('influentialCitationCount') # todo implement this
+                    raw_year = bib.get('year')
 
-                    publication_date_raw = item.get('publicationDate')
-                    if publication_date_raw == None:
-                        publication_date_raw = 0
-                    print(publication_date_raw)
-                    article = Article(
-                        title=item.get('title', 'N/A'),
-                        abstract=processed_abstract,
-                        url=item.get('url', 'N/A'),
-                        citations=item.get('citationCount', 0),
-                        publication_date=str(publication_date_raw)[:4],
-                        source="Semantic Scholar"
-                    )
-                    articles.append(article)
-                    print(f"Found: {article.title} ({article.publication_date}, {article.citations} citations)")
+                    # Csak akkor dolgozzuk fel, ha minden mező létezik és nem None
+                    if raw_title and (raw_abstract or raw_tldr) and raw_url and raw_citations is not None:
+                        if raw_year is None:
+                            raw_year = 1900
+                        # Process abstract for CSV format
+                        if raw_abstract is None:
+                            processed_abstract = 'None'
+                        else:
+                            processed_abstract = " ".join(raw_abstract.split()).strip()
+                        if raw_tldr is None:
+                            processed_tldr = 'None'
+                        else:
+                            processed_tldr = raw_tldr['text']
+                        if raw_influential_citations is None:
+                            raw_influential_citations = 0
+                        processed_authors = ', '.join([author['name'] for author in raw_authors])
+
+                        article = Article(
+                            title=raw_title,
+                            authors=processed_authors,
+                            abstract=processed_abstract,
+                            tldr=processed_tldr,
+                            url=raw_url,
+                            citations=raw_citations,
+                            influential_citations=raw_influential_citations,
+                            publication_year=raw_year,
+                            source="Google Scholar"
+                        )
+                        articles.append(article)
+                        print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
+                    else:
+                        print(f"Skipping article due to missing fields: {bib}")
+
             else:
                 print(f"Error fetching data: {response.status_code}")
 
@@ -313,8 +342,6 @@ class ScholarlyAgent(ResearchAgent):
             print(f"Error searching for '{query}': {str(e)}")
 
         return articles
-
-
 
     def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
         print(f"\nFound {len(articles)} articles ({new_articles} new)")
@@ -495,6 +522,7 @@ class FilterRankAgent(ResearchAgent):
             prompt = f"""Research topic: {self.state.topic}
 
             Paper Title: {row['Title']}
+            TLDR: {row['TLDR']} 
             Abstract: {row['Abstract']}
             Year: {row['Year']}
             Citations: {row['Citations']}
