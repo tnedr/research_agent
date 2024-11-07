@@ -169,7 +169,7 @@ class KeywordAgent(ResearchAgent):
         return state
 
 
-class ScholarlyAgent(ResearchAgent):
+class PublicationSearchAgent(ResearchAgent):
     def __init__(self, llm: Any):
         super().__init__(llm)
         self.max_results = 10
@@ -674,7 +674,7 @@ class ResearchWorkflow:
     def __init__(self, llm_configs: Dict[str, Any]):
         self.agents = {
             "keyword": KeywordAgent(llm_configs.get("keyword")),
-            "scholarly": ScholarlyAgent(llm_configs.get("default"))
+            "scholarly": PublicationSearchAgent(llm_configs.get("default"))
         }
 
         self.workflow = self._build_workflow()
@@ -747,8 +747,8 @@ def test_keyword_agent():
     return result_state.keywords
 
 
-def test_scholarly_agent():
-    print("Scholarly Agent Interactive Test")
+def test_publication_search_agent():
+    print("PublicationSearchAgent Interactive Test")
 
     keywords = ["eggs cardiovascular health meta-analysis",
                 "eggs cholesterol heart disease review"]
@@ -760,7 +760,7 @@ def test_scholarly_agent():
         temp_csv_path=filename
     )
 
-    agent = ScholarlyAgent(None)
+    agent = PublicationSearchAgent(None)
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
