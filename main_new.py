@@ -34,6 +34,13 @@ class ResearchState(BaseModel):
     articles_by_query: Dict[str, List[Article]] = Field(default_factory=dict)  # query -> [Article]
     all_articles: Dict[str, Article] = Field(default_factory=dict)  # title -> Article
     temp_csv_path: str = "research_articles.csv"  # CSV útvonal
+    filtered_csv_path: str = ""  # Ez lesz az új filtered CSV útja
+
+    def generate_filtered_path(self) -> str:
+        """Generate filtered CSV path based on original path"""
+        base, ext = os.path.splitext(self.temp_csv_path)
+        return f"{base}_filtered{ext}"
+
 
 # Base Agent Class
 class ResearchAgent(ABC):
@@ -317,6 +324,169 @@ class ScholarlyAgent(ResearchAgent):
             print(f"{i}. [{art.citations} citations] {art.title}")
 
 
+class FilterRankAgent(ResearchAgent):
+    def __init__(self, llm: Any):
+        super().__init__(llm)
+        self.current_year = 2024
+        self.min_citations = 5
+        self.min_citations_per_year = 0.5
+        self.min_year = 1990
+        self.max_papers = 20
+
+
+    def _calculate_citation_metrics(self, row: pd.Series) -> tuple:
+        """
+        Calculate citation metrics:
+        - Citations per year
+        - Total citations (normalized)
+        - Recency score
+        """
+        year = row['Year']
+        citations = row['Citations']
+
+        # Citations per year
+        years_since_pub = self.current_year - year + 1
+        citations_per_year = citations / years_since_pub
+
+        # Recency score (0-1, newer is higher)
+        recency_score = (year - self.min_year) / (self.current_year - self.min_year)
+
+        return citations_per_year, citations, recency_score
+
+    def _initial_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Initial filtering and ranking based on citation metrics.
+        No LLM used here.
+        """
+        print(f"Starting initial filter with {len(df)} articles...")
+
+        # Create working copy
+        filtered_df = df.copy()
+
+        # Calculate all metrics
+        metrics = []
+        for idx, row in filtered_df.iterrows():
+            cpy, total_cites, recency = self._calculate_citation_metrics(row)
+            metrics.append({
+                'Title': row['Title'],
+                'citations_per_year': cpy,
+                'citation_score': total_cites,
+                'recency_score': recency
+            })
+
+        # Convert metrics to DataFrame and merge with original
+        metrics_df = pd.DataFrame(metrics)
+        filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
+
+        # Basic filtering
+        filtered_df = filtered_df[
+            (filtered_df['citations_per_year'] >= self.min_citations_per_year) &
+            (filtered_df['Year'] >= self.min_year)
+            ]
+
+        print(f"After basic filtering: {len(filtered_df)} articles")
+
+        if filtered_df.empty:
+            print("Warning: No articles passed the initial filter. Relaxing criteria...")
+            filtered_df = df.copy()
+            filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
+
+        # Normalize scores to 0-1 range
+        if len(filtered_df) > 0:
+            # Citations per year score
+            max_cpy = filtered_df['citations_per_year'].max()
+            filtered_df['cpy_score'] = filtered_df['citations_per_year'] / max_cpy if max_cpy > 0 else 0
+
+            # Total citations score
+            max_cites = filtered_df['Citations'].max()
+            filtered_df['citation_score'] = filtered_df['Citations'] / max_cites if max_cites > 0 else 0
+
+            # Calculate final relevance score
+            filtered_df['relevance_score'] = (
+                    filtered_df['cpy_score'] * 0.4 +  # Citations per year (largest weight)
+                    filtered_df['citation_score'] * 0.3 +  # Total citations
+                    filtered_df['recency_score'] * 0.3  # Recency
+            )
+
+        # Sort by relevance score and keep top papers
+        result_df = filtered_df.sort_values(
+            by='relevance_score',
+            ascending=False
+        ).head(self.max_papers)
+
+        # Display metrics for debugging
+        print("\nTop 5 papers with metrics:")
+        display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
+                        'cpy_score', 'citation_score', 'recency_score', 'relevance_score']
+        pd.set_option('display.max_columns', None)
+        print(result_df[display_cols].head().to_string())
+
+        return result_df
+
+    def process(self, state: ResearchState) -> ResearchState:
+        """Main processing pipeline"""
+        self.state = state
+
+        # Generate filtered CSV path
+        state.filtered_csv_path = state.generate_filtered_path()
+        print(f"Loading data from {state.temp_csv_path}")
+        print(f"Filtered results will be saved to {state.filtered_csv_path}")
+
+        df = pd.read_csv(state.temp_csv_path)
+
+        # 1. Initial filtering with metadata and citation metrics
+        light_df = df[['Title', 'Year', 'Citations', 'URL', 'Source Query']]
+        filtered_df = self._initial_filter(light_df)
+
+        # 2. Get full data for filtered articles
+        full_filtered_df = df[df['Title'].isin(filtered_df['Title'])].copy()
+
+        # 3. Add metrics to full data
+        final_df = pd.merge(full_filtered_df,
+                            filtered_df[['Title', 'citations_per_year', 'cpy_score',
+                                         'citation_score', 'recency_score', 'relevance_score']],
+                            on='Title')
+
+        # Reorder columns with metrics right after Citations and Year
+        column_order = [
+            'Title',
+            'Year',
+            'Citations',
+            'citations_per_year',  # Metrikák kezdődnek
+            'cpy_score',
+            'citation_score',
+            'recency_score',
+            'relevance_score',  # Metrikák végződnek
+            'Abstract',
+            'URL',
+            'Source Query'
+        ]
+
+        # Ellenőrizzük, hogy minden oszlop szerepel-e a sorrendben
+        remaining_cols = [col for col in final_df.columns if col not in column_order]
+        column_order.extend(remaining_cols)  # Ha van extra oszlop, azt a végére tesszük
+
+        final_df = final_df[column_order]
+
+        # Save filtered results with metrics
+        final_df.to_csv(state.filtered_csv_path, index=False)
+
+        print("\nFiltering and ranking complete!")
+        print(f"Original articles: {len(df)}")
+        print(f"Filtered articles: {len(final_df)}")
+        print(f"Results saved to: {state.filtered_csv_path}")
+
+        # Display the first few rows with key columns to verify ordering
+        print("\nFirst few rows of filtered results:")
+        display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
+                        'cpy_score', 'relevance_score']
+        print(final_df[display_cols].head().to_string())
+
+        return state
+
+
+
+
 class ResearchWorkflow:
     """Manages the multi-agent research workflow"""
 
@@ -413,6 +583,46 @@ def test_scholarly_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.temp_csv_path}")
+
+
+def test_filter_rank_agent():
+    print("FilterRank Agent Test")
+
+    # Test CSV paths
+    input_csv = 'research_results_Health_effects_of_eggs_on_cardiovascular_health_20241106_212158.csv'
+
+    # Initial state
+    state = ResearchState(
+        topic="Health effects of eggs on cardiovascular health",
+        keywords=["eggs cardiovascular health meta-analysis",
+                  "eggs cholesterol heart disease review"],
+        temp_csv_path=input_csv
+    )
+
+    # Initialize and run agent
+    agent = FilterRankAgent(None)
+
+    print("\nStarting initial filtering and ranking...")
+    result_state = agent.process(state)
+
+    # Load and display results
+    results_df = pd.read_csv(result_state.filtered_csv_path)
+    print(f"\nFiltered down to {len(results_df)} articles")
+    print("\nTop 5 ranked articles with metrics:")
+
+    # Display formatted results
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', None)
+    display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
+                    'relevance_score']
+    print(results_df[display_cols].head().to_string())
+
+    return result_state
+
+test_filter_rank_agent()
+import sys
+sys.exit()
+
 
 
 def test_workflow():
