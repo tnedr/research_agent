@@ -1168,7 +1168,6 @@ def test_workflow():
 # import sys
 # sys.exit()
 
-
 def main():
     # Configure LLMs for different agents
     llm_configs = {
@@ -1201,8 +1200,7 @@ def main():
     # print("\nFinal Summary:", results["summary"])
 
 
-
 if __name__ == "__main__":
     # test_keyword_agent()
     # test_scholarly_agent()
-    # main()
+    main()
