@@ -18,6 +18,8 @@ import json
 from typing import List
 import logging
 from datetime import datetime
+import sys
+
 
 
 
@@ -354,7 +356,7 @@ class CitationFilterAgent(ResearchAgent):
         self.min_citations = 5
         self.min_citations_per_year = 0.5
         self.min_year = 1990
-        self.max_papers = 20
+        self.max_papers = 50
 
 
     def _calculate_citation_metrics(self, row: pd.Series) -> tuple:
@@ -374,6 +376,9 @@ class CitationFilterAgent(ResearchAgent):
         # Recency score (0-1, newer is higher)
         recency_score = (year - self.min_year) / (self.current_year - self.min_year)
 
+        logger.debug(f"Metrics for '{row['Title']}': Citations/Year={citations_per_year}, "
+                     f"Total Citations={citations}, Recency Score={recency_score}")
+
         return citations_per_year, citations, recency_score
 
     def _initial_filter(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -381,7 +386,7 @@ class CitationFilterAgent(ResearchAgent):
         Initial filtering and ranking based on citation metrics.
         No LLM used here.
         """
-        print(f"Starting initial filter with {len(df)} articles...")
+        logger.info(f"Starting initial filter with {len(df)} articles...")
 
         # Create working copy
         filtered_df = df.copy()
@@ -407,10 +412,10 @@ class CitationFilterAgent(ResearchAgent):
             (filtered_df['Year'] >= self.min_year)
             ]
 
-        print(f"After basic filtering: {len(filtered_df)} articles")
+        logger.info(f"After citation filtering: {len(filtered_df)} articles remaining.")
 
         if filtered_df.empty:
-            print("Warning: No articles passed the initial filter. Relaxing criteria...")
+            logger.warning("No articles passed the citation filter. Relaxing criteria...")
             filtered_df = df.copy()
             filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
 
@@ -437,31 +442,24 @@ class CitationFilterAgent(ResearchAgent):
             ascending=False
         ).head(self.max_papers)
 
-        # Display metrics for debugging
-        print("\nTop 5 papers with metrics:")
-        display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
-                        'cpy_score', 'citation_score', 'recency_score', 'relevance_score']
-        pd.set_option('display.max_columns', None)
-        print(result_df[display_cols].head().to_string())
-
         return result_df
 
     def process(self, state: ResearchState) -> ResearchState:
         """Citation-based filtering process"""
-        print(f"Loading data from {state.raw_result_path}")
+        logger.info(f"Loading data from {state.raw_result_path}")
         state.filtered_csv_path = state.generate_citation_filtered_path()
-        print(f"Citation-filtered results will be saved to {state.filtered_csv_path}")
+        logger.info(f"Citation-filtered results will be saved to {state.filtered_csv_path}")
 
         # Load data
         df = pd.read_csv(state.raw_result_path)
 
         # Citation-based filtering
-        print("\nStep 1: Citation-based filtering...")
+        logger.info("Step 1: Starting citation-based filtering...")
         filtered_df = self._initial_filter(df)
 
         # Save results
         filtered_df.to_csv(state.filtered_csv_path, index=False)
-        print(f"\nSaved {len(filtered_df)} citation-filtered articles to {state.filtered_csv_path}")
+        logger.info(f"Saved {len(filtered_df)} citation-filtered articles to {state.filtered_csv_path}")
 
         return state
 
@@ -566,14 +564,14 @@ class TitleFilterAgent(ResearchAgent):
 
     def process(self, state: ResearchState, batch_size: int = 10) -> ResearchState:
         """Process the citation-filtered papers and filter based on titles"""
-        print("\nStarting title-based filtering...")
+        logger.info("Starting title-based filtering...")
 
         # Generate paths
         base, ext = os.path.splitext(state.filtered_csv_path)
         state.title_filtered_path = f"{base.replace('citation_filtered', 'title_filtered')}{ext}"
 
-        print(f"Loading citation-filtered data from {state.filtered_csv_path}")
-        print(f"Title-filtered results will be saved to {state.title_filtered_path}")
+        logger.info(f"Loading citation-filtered data from {state.filtered_csv_path}")
+        logger.info(f"Title-filtered results will be saved to {state.title_filtered_path}")
 
         # Load the citation-filtered data
         df = pd.read_csv(state.filtered_csv_path)
@@ -587,7 +585,7 @@ class TitleFilterAgent(ResearchAgent):
             'study_types': {}
         }
 
-        print(f"\nAnalyzing {len(df)} paper titles in batches of {batch_size}...")
+        logger.info(f"Analyzing {len(df)} paper titles in batches of {batch_size}...")
 
         # Process in batches
         results = []
@@ -596,7 +594,7 @@ class TitleFilterAgent(ResearchAgent):
             batch_df = df.iloc[start_idx:start_idx + batch_size]
             batch_papers = batch_df.to_dict('records')
 
-            print(f"\nProcessing batch {start_idx // batch_size + 1}/{(len(df) + batch_size - 1) // batch_size}")
+            logger.info(f"Processing batch {start_idx // batch_size + 1}/{(len(df) + batch_size - 1) // batch_size}")
 
             batch_results = self._analyze_title_batch(batch_papers, state.topic, batch_size)
 
@@ -604,13 +602,12 @@ class TitleFilterAgent(ResearchAgent):
             for analysis in batch_results:
                 real_idx = start_idx + analysis['index']
 
-                # Log results
-                print(f"\nPaper {real_idx + 1}: {df.iloc[real_idx]['Title']}")
-                print(f"Relevance:     {analysis['relevance_score']:.3f}")
-                print(f"Topic Match:   {'Yes' if analysis['topic_match'] else 'No'}")
-                print(f"Study Type:    {analysis['study_type']}")
-                print(f"Batch Rank:    {analysis['importance_rank']}")
-                print(f"Reasoning:     {analysis['reasoning']}")
+                paper_title = df.iloc[real_idx]['Title']
+                logger.debug(f"Analysis for Paper {real_idx + 1}: {paper_title}")
+                logger.debug(
+                    f"Relevance: {analysis['relevance_score']:.3f}, Topic Match: {'Yes' if analysis['topic_match'] else 'No'}")
+                logger.debug(f"Study Type: {analysis['study_type']}, Batch Rank: {analysis['importance_rank']}")
+                logger.debug(f"Reasoning: {analysis['reasoning']}")
 
                 # Update statistics
                 stats['processed'] += 1
@@ -642,22 +639,23 @@ class TitleFilterAgent(ResearchAgent):
             title_filtered_df['reasoning'] = [r['reasoning'] for r in results]
 
             title_filtered_df.to_csv(state.title_filtered_path, index=False)
+            logger.info(f"Saved {len(title_filtered_df)} title-filtered articles to {state.title_filtered_path}")
         else:
-            print("Warning: No papers passed title filtering. Copying citation-filtered data.")
+            logger.warning("No papers passed title filtering. Copying citation-filtered data.")
             df.to_csv(state.title_filtered_path, index=False)
 
         # Print summary
-        print("\nTITLE FILTERING SUMMARY")
-        print("=" * 80)
-        print(f"Papers processed:  {stats['processed']}/{stats['total']}")
-        print(f"Papers included:   {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
-        print(f"Errors:           {stats['errors']}")
+        logger.info("TITLE FILTERING SUMMARY")
+        logger.info("=" * 80)
+        logger.info(f"Papers processed: {stats['processed']}/{stats['total']}")
+        logger.info(f"Papers included: {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
+        logger.info(f"Errors: {stats['errors']}")
 
-        print("\nSTUDY TYPES FOUND")
-        print("-" * 80)
+        logger.info("\nSTUDY TYPES FOUND")
+
         for study_type, count in sorted(stats['study_types'].items(), key=lambda x: x[1], reverse=True):
-            print(f"{study_type:20} {count:3d} papers")
-        print("=" * 80)
+            logger.info(f"{study_type:20} {count:3d} papers")
+        logger.info("=" * 80)
 
         return state
 
@@ -696,7 +694,7 @@ class ContentSynthesisAgent(ResearchAgent):
     def process(self, state: ResearchState) -> ResearchState:
         """Process the title-filtered papers, select relevant ones and create synthesis"""
         self.state = state
-        print("\nStarting content synthesis...")
+        logger.info("Starting content synthesis...")
 
         # Load title-filtered data
         print(f"Loading data from {state.title_filtered_path}")
@@ -707,8 +705,8 @@ class ContentSynthesisAgent(ResearchAgent):
         synthesis_md_path = f"{base.replace('title_filtered', 'synthesis')}.md"
         state.synthesis_results_path = f"{base.replace('title_filtered', 'synthesis_results')}.csv"
 
-        print(f"Synthesis results will be saved to: {state.synthesis_results_path}")
-        print(f"Synthesis summary will be saved to: {synthesis_md_path}")
+        logger.info(f"Synthesis results will be saved to: {state.synthesis_results_path}")
+        logger.info(f"Synthesis summary will be saved to: {synthesis_md_path}")
 
         system_prompt = """You are a research synthesis specialist. Your task is to:
         1. Evaluate each paper's relevance to the research topic
@@ -758,8 +756,8 @@ class ContentSynthesisAgent(ResearchAgent):
 
             # Add debug info and better error handling
             if not response.tool_calls:
-                print("Error: No tool calls in response")
-                print("Raw response:", response)
+                logger.error("Error: No tool calls in response")
+                logger.error(f"Raw response: {response}")
                 raise ValueError("LLM response contains no tool calls")
 
             if len(response.tool_calls) == 0:
@@ -772,25 +770,24 @@ class ContentSynthesisAgent(ResearchAgent):
                 synthesis = response.tool_calls[0]["args"] if isinstance(response.tool_calls[0], dict) else \
                 response.tool_calls[0].args
             except (AttributeError, KeyError) as e:
-                print("Error: Malformed tool call response")
-                print("Tool calls structure:", response.tool_calls)
-                print("Tool call type:", type(response.tool_calls[0]))
-                print("Error details:", str(e))
+                logger.error(f"Error: Malformed tool call response - {e}")
+                logger.error(f"Tool calls structure: {response.tool_calls}")
+                logger.error(f"Tool call type: {type(response.tool_calls[0])}")
+                logger.error(f"Error details: {e}")
                 raise ValueError("Malformed tool call in LLM response")
 
             # Process selected papers
             selected_papers = synthesis['selected_papers']
-            print(f"\nPaper Selection Results:")
-            print("=" * 80)
-            print(f"Total papers analyzed: {len(papers_data)}")
-            print(f"Papers selected: {len(selected_papers)}")
+            logger.info("Paper Selection Results:")
+            logger.info(f"Total papers analyzed: {len(papers_data)}")
+            logger.info(f"Papers selected: {len(selected_papers)}")
 
             # Create DataFrame with selected papers
             selected_indices = []
             selection_info = []
 
             for paper in selected_papers:
-                print(f"Processing paper at index {paper['index']}: {paper['title']}")
+                logger.info(f"Processing selected paper at index {paper['index']}: {paper['title']}")
                 selected_indices.append(paper['index'])
                 selection_info.append({
                     'relevance_score': paper['relevance_score'],
@@ -811,22 +808,22 @@ class ContentSynthesisAgent(ResearchAgent):
 
                 # Save to CSV
                 results_df.to_csv(state.synthesis_results_path, index=False)
-                print(f"\nSaved {len(results_df)} selected papers to {state.synthesis_results_path}")
+                logger.info(f"Saved {len(results_df)} selected papers to {state.synthesis_results_path}")
 
                 # Create and save synthesis markdown
                 markdown_content = self._create_markdown(synthesis, state.topic)
                 with open(synthesis_md_path, 'w', encoding='utf-8') as f:
                     f.write(markdown_content)
-                print(f"Synthesis summary saved to: {synthesis_md_path}")
+                logger.info(f"Synthesis summary saved to: {synthesis_md_path}")
             else:
-                print("\nWarning: No papers were selected as relevant")
+                logger.warning("No papers were selected as relevant.")
                 # Save empty results
                 df.head(0).to_csv(state.synthesis_results_path, index=False)
 
             return state
 
         except Exception as e:
-            print(f"Error in content synthesis: {e}")
+            logger.exception(f"Error in content synthesis: {e}")
             raise
 
     def _create_markdown(self, synthesis: Dict, topic: str) -> str:
@@ -1113,9 +1110,8 @@ def test_keyword_agent():
     print("\nGenerated keywords:", result_state.keywords)
 
     return result_state.keywords
-test_keyword_agent()
-import sys
-sys.exit()
+# test_keyword_agent()
+# sys.exit()
 
 
 def test_publication_search_agent():
@@ -1135,9 +1131,8 @@ def test_publication_search_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.raw_result_path}")
-test_publication_search_agent()
-import sys
-sys.exit()
+# test_publication_search_agent()
+# sys.exit()
 
 
 
@@ -1169,7 +1164,6 @@ def test_filtering_agents():
 
     return state
 # test_filtering_agents()
-# import sys
 # sys.exit()
 
 
@@ -1230,7 +1224,6 @@ def test_content_synthesis():
 
     return state
 test_content_synthesis()
-import sys
 sys.exit()
 
 
