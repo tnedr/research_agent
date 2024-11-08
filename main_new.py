@@ -666,198 +666,110 @@ class ContentSynthesisAgent(ResearchAgent):
         self.tools = [{
             "type": "function",
             "function": {
-                "name": "synthesize_research_content",
-                "description": "Analyze and synthesize research papers, selecting relevant ones for the topic",
+                "name": "analyze_paper_findings",
+                "description": "Extract relevant findings from a research paper",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "selected_papers": {
+                        "key_findings": {
                             "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "index": {"type": "integer"},  # Add index to properties
-                                    "title": {"type": "string"},
-                                    "relevance_score": {"type": "number"},
-                                    "reasoning": {"type": "string"}
-                                },
-                                "required": ["index", "title", "relevance_score", "reasoning"]
-                            },
-                            "description": "Papers selected as relevant for the research topic"
+                            "items": {"type": "string"},
+                            "description": "Main findings relevant to the research topic"
                         },
-                        # ... rest of the tool definition remains the same ...
-                    }
+                        "methodology": {"type": "string"},
+                        "limitations": {"type": "string"},
+                        "relevance_explanation": {"type": "string"},
+                        "contribution_to_topic": {"type": "string"}
+                    },
+                    "required": ["key_findings", "methodology", "limitations", "relevance_explanation",
+                                 "contribution_to_topic"]
                 }
             }
         }]
 
     def process(self, state: ResearchState) -> ResearchState:
-        """Process the title-filtered papers, select relevant ones and create synthesis"""
-        self.state = state
-        logger.info("Starting content synthesis...")
+        """Extract findings from title-filtered papers one by one"""
+        logger.info("Starting research findings extraction...")
 
         # Load title-filtered data
-        print(f"Loading data from {state.title_filtered_path}")
         df = pd.read_csv(state.title_filtered_path)
 
         # Create output paths
         base, _ = os.path.splitext(state.title_filtered_path)
-        synthesis_md_path = f"{base.replace('title_filtered', 'synthesis')}.md"
-        state.synthesis_results_path = f"{base.replace('title_filtered', 'synthesis_results')}.csv"
+        synthesis_path = f"{base.replace('title_filtered', 'synthesis')}.md"
 
-        logger.info(f"Synthesis results will be saved to: {state.synthesis_results_path}")
-        logger.info(f"Synthesis summary will be saved to: {synthesis_md_path}")
+        system_prompt = """You are a research findings specialist. Your task is to:
+        1. Extract key findings specifically related to the research topic
+        2. Evaluate the methodology and limitations
+        3. Explain how this paper contributes to our understanding of the topic
+        Be specific and focus on findings directly relevant to the topic."""
 
-        system_prompt = """You are a research synthesis specialist. Your task is to:
-        1. Evaluate each paper's relevance to the research topic
-        2. Select only papers that provide valuable insights for the topic
-        3. Identify main themes and findings
-        4. Recognize research directions
+        findings_list = []
 
-        Be selective - only include papers that directly contribute to understanding the research topic.
-        Provide clear reasoning for paper selection/rejection.
-        Create a comprehensive synthesis of the selected papers."""
-
-        # Prepare paper data for analysis
-        papers_data = []
+        # Process each paper individually
         for idx, row in df.iterrows():
-            papers_data.append({
-                'index': int(idx),  # explicitly convert to int for serialization
-                'title': row['Title'],
-                'abstract': row['Abstract'],
-                'tldr': row['TLDR'] if pd.notna(row['TLDR']) else None,
-                'year': row['Year'],
-                'study_type': row['study_type'] if 'study_type' in row else None
-            })
+            logger.info(f"\nAnalyzing paper {idx + 1}/{len(df)}:")
+            logger.info(f"Title: {row['Title']}")
 
-        prompt = f"""Research topic: {state.topic}
+            paper_prompt = f"""Research topic: {state.topic}
 
-        Analyze these papers for relevance and synthesize their content.
-        For each paper:
-        1. Evaluate relevance to: {state.topic}
-        2. Provide clear reasoning for inclusion/exclusion
-        3. Score relevance from 0-1
+            Analyze this paper for relevant findings:
+            Title: {row['Title']}
+            Abstract: {row['Abstract']}
+            TLDR: {row['TLDR'] if pd.notna(row['TLDR']) else 'None'}
+            Study Type: {row['study_type'] if 'study_type' in row else 'Not specified'}
+            Year: {row['Year']}
 
-        Only include papers that provide direct value for understanding {state.topic}.
-        Create a thorough synthesis of the selected papers.
+            Extract findings specifically related to: {state.topic}
+            Use the analyze_paper_findings function for your analysis."""
 
-        Papers to analyze:
-        {json.dumps(papers_data, indent=2)}
-
-        Use the synthesize_research_content function for your analysis."""
-
-        try:
-            # Get synthesis from LLM
-            llm_with_tools = self.llm.bind_tools(self.tools)
-            response = llm_with_tools.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=prompt)
-            ])
-
-            # Add debug info and better error handling
-            if not response.tool_calls:
-                logger.error("Error: No tool calls in response")
-                logger.error(f"Raw response: {response}")
-                raise ValueError("LLM response contains no tool calls")
-
-            if len(response.tool_calls) == 0:
-                print("Error: Empty tool_calls list")
-                print("Raw response:", response)
-                raise ValueError("Empty tool_calls list in LLM response")
-
-            # Get synthesis from tool call with error checking
             try:
-                synthesis = response.tool_calls[0]["args"] if isinstance(response.tool_calls[0], dict) else \
-                response.tool_calls[0].args
-            except (AttributeError, KeyError) as e:
-                logger.error(f"Error: Malformed tool call response - {e}")
-                logger.error(f"Tool calls structure: {response.tool_calls}")
-                logger.error(f"Tool call type: {type(response.tool_calls[0])}")
-                logger.error(f"Error details: {e}")
-                raise ValueError("Malformed tool call in LLM response")
+                llm_with_tools = self.llm.bind_tools(self.tools)
+                response = llm_with_tools.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=paper_prompt)
+                ])
 
-            # Process selected papers
-            selected_papers = synthesis['selected_papers']
-            logger.info("Paper Selection Results:")
-            logger.info(f"Total papers analyzed: {len(papers_data)}")
-            logger.info(f"Papers selected: {len(selected_papers)}")
+                if response.tool_calls and response.tool_calls[0]["args"]:
+                    paper_analysis = response.tool_calls[0]["args"]
+                    paper_analysis['title'] = row['Title']
+                    paper_analysis['year'] = row['Year']
+                    findings_list.append(paper_analysis)
 
-            # Create DataFrame with selected papers
-            selected_indices = []
-            selection_info = []
+                    # Log findings for this paper
+                    logger.info("\nFindings extracted:")
+                    for finding in paper_analysis['key_findings']:
+                        logger.info(f"- {finding}")
 
-            for paper in selected_papers:
-                logger.info(f"Processing selected paper at index {paper['index']}: {paper['title']}")
-                selected_indices.append(paper['index'])
-                selection_info.append({
-                    'relevance_score': paper['relevance_score'],
-                    'selection_reasoning': paper['reasoning']
-                })
+            except Exception as e:
+                logger.error(f"Error analyzing paper: {str(e)}")
+                continue
 
-            if selected_indices:
-                # Create results DataFrame
-                results_df = df.iloc[selected_indices].copy()
-                # Add selection info
-                for col, values in zip(['relevance_score', 'selection_reasoning'],
-                                       zip(*[(info['relevance_score'], info['selection_reasoning'])
-                                             for info in selection_info])):
-                    results_df[col] = values
+        # Create synthesis markdown from all findings
+        if findings_list:
+            markdown = self._create_synthesis_markdown(findings_list, state.topic)
+            with open(synthesis_path, 'w', encoding='utf-8') as f:
+                f.write(markdown)
+            logger.info(f"\nSynthesis saved to: {synthesis_path}")
 
-                # Sort by relevance score
-                results_df = results_df.sort_values('relevance_score', ascending=False)
+        return state
 
-                # Save to CSV
-                results_df.to_csv(state.synthesis_results_path, index=False)
-                logger.info(f"Saved {len(results_df)} selected papers to {state.synthesis_results_path}")
+    def _create_synthesis_markdown(self, findings_list: List[Dict], topic: str) -> str:
+        markdown = f"""# Research Findings Analysis: {topic}
 
-                # Create and save synthesis markdown
-                markdown_content = self._create_markdown(synthesis, state.topic)
-                with open(synthesis_md_path, 'w', encoding='utf-8') as f:
-                    f.write(markdown_content)
-                logger.info(f"Synthesis summary saved to: {synthesis_md_path}")
-            else:
-                logger.warning("No papers were selected as relevant.")
-                # Save empty results
-                df.head(0).to_csv(state.synthesis_results_path, index=False)
-
-            return state
-
-        except Exception as e:
-            logger.exception(f"Error in content synthesis: {e}")
-            raise
-
-    def _create_markdown(self, synthesis: Dict, topic: str) -> str:
-        """Create markdown document from synthesis results"""
-        markdown = f"""# Research Synthesis: {topic}
-
-## Selected Papers
-"""
-        # Add selected papers section
-        markdown += "\nThe following papers were selected as relevant for this topic:\n"
-        for paper in synthesis['selected_papers']:
-            markdown += f"\n### {paper['title']}\n"
-            markdown += f"Relevance Score: {paper['relevance_score']:.2f}\n"
-            markdown += f"Reasoning: {paper['reasoning']}\n"
-
-        # Add synthesis summary
-        markdown += f"\n## Overview\n{synthesis['synthesis_summary']}\n"
-
-        # Add main themes
-        markdown += "\n## Main Research Themes\n"
-        for theme in synthesis['main_themes']:
-            markdown += f"\n### {theme['theme']}\n"
-            markdown += f"{theme['description']}\n\n"
-            markdown += "Key Findings:\n"
-            for finding in theme['key_findings']:
+    ## Paper-by-Paper Analysis
+    """
+        for paper in findings_list:
+            markdown += f"\n### {paper['title']} ({paper['year']}):\n"
+            markdown += "\n#### Key Findings:\n"
+            for finding in paper['key_findings']:
                 markdown += f"- {finding}\n"
-            markdown += "\nRelevant Papers:\n"
-            for paper in theme['related_papers']:
-                markdown += f"- {paper}\n"
 
-        # Add research directions
-        markdown += "\n## Future Research Directions\n"
-        for direction in synthesis['research_directions']:
-            markdown += f"- {direction}\n"
+            markdown += f"\n**Methodology:** {paper['methodology']}\n"
+            markdown += f"\n**Limitations:** {paper['limitations']}\n"
+            markdown += f"\n**Contribution:** {paper['contribution_to_topic']}\n"
+            markdown += f"\n**Relevance:** {paper['relevance_explanation']}\n"
+            markdown += "\n---\n"
 
         return markdown
 
