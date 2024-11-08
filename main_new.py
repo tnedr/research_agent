@@ -39,25 +39,33 @@ class ResearchState(BaseModel):
     keywords: List[str] = Field(default_factory=list)
     articles_by_query: Dict[str, List[Article]] = Field(default_factory=dict)  # query -> [Article]
     all_articles: Dict[str, Article] = Field(default_factory=dict)  # title -> Article
-    temp_csv_path: str = "research_articles.csv"  # CSV útvonal
+    raw_result_path: str = "raw_results.csv"  # CSV útvonal
     filtered_csv_path: str = ""    # Citation-based filtering results
     title_filtered_path: str = ""  # Title-based filtering results
-    final_csv_path: str = ""       # LLM-based filtering results
+    synthesis_results_path: str = ""  # Selected relevant papers
+    synthesis_md_path: str = ""  # Synthesis markdown document
 
-    def generate_filtered_path(self) -> str:
-        """Generate citation-filtered CSV path based on original path"""
-        base, ext = os.path.splitext(self.temp_csv_path)
+
+    def generate_citation_filtered_path(self) -> str:
+        base, ext = os.path.splitext(self.raw_result_path)
         return f"{base}_citation_filtered{ext}"
 
     def generate_title_filtered_path(self) -> str:
-        """Generate title-filtered CSV path"""
-        base, ext = os.path.splitext(self.temp_csv_path)
+        base, ext = os.path.splitext(self.raw_result_path)
         return f"{base}_title_filtered{ext}"
 
-    def generate_final_path(self) -> str:
-        """Generate final filtered CSV path"""
-        base, ext = os.path.splitext(self.temp_csv_path)
-        return f"{base}_final_filtered{ext}"
+    def generate_synthesis_path(self) -> str:
+        base, ext = os.path.splitext(self.raw_results_path)
+        return f"{base}_synthesis{ext}"
+
+
+    def generate_synthesis_paths(self) -> tuple[str, str]:
+        """Generate synthesis CSV and markdown paths"""
+        base, ext = os.path.splitext(self.raw_results_path)
+        return (
+            f"{base}_synthesis_results{ext}",
+            f"{base}_synthesis.md"
+        )
 
 
 # Base Agent Class
@@ -258,8 +266,8 @@ class PublicationSearchAgent(ResearchAgent):
             df = df[columns]
 
             # Save to CSV
-            df.to_csv(state.temp_csv_path, index=False)
-            print(f"Saved {len(df)} unique articles to {state.temp_csv_path}")
+            df.to_csv(state.raw_result_path, index=False)
+            print(f"Saved {len(df)} unique articles to {state.raw_result_path}")
 
     def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
         articles = []
@@ -612,12 +620,12 @@ class FilterRankAgent(ResearchAgent):
         state.filtered_csv_path = state.generate_filtered_path()
         state.final_csv_path = state.generate_final_path()
 
-        print(f"Loading data from {state.temp_csv_path}")
+        print(f"Loading data from {state.raw_result_path}")
         print(f"Citation-filtered results will be saved to {state.filtered_csv_path}")
         print(f"Final filtered results will be saved to {state.final_csv_path}")
 
         # 1. Load full data
-        df = pd.read_csv(state.temp_csv_path)
+        df = pd.read_csv(state.raw_result_path)
 
         # 2. Initial filtering with citation metrics
         print("\nStep 1: Citation-based filtering...")
@@ -763,12 +771,12 @@ class CitationFilterAgent(ResearchAgent):
 
     def process(self, state: ResearchState) -> ResearchState:
         """Citation-based filtering process"""
-        print(f"Loading data from {state.temp_csv_path}")
-        state.filtered_csv_path = state.generate_filtered_path()
+        print(f"Loading data from {state.raw_result_path}")
+        state.filtered_csv_path = state.generate_citation_filtered_path()
         print(f"Citation-filtered results will be saved to {state.filtered_csv_path}")
 
         # Load data
-        df = pd.read_csv(state.temp_csv_path)
+        df = pd.read_csv(state.raw_result_path)
 
         # Citation-based filtering
         print("\nStep 1: Citation-based filtering...")
@@ -977,265 +985,30 @@ class TitleFilterAgent(ResearchAgent):
         return state
 
 
-class ContentFilterAgent(ResearchAgent):
-    def __init__(self, llm: Any):
-        super().__init__(llm)
-        # Tool for consistent output format
-        self.tools = [{
-            "type": "function",
-            "function": {
-                "name": "analyze_paper_relevance",
-                "description": "Analyze paper relevance and content",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "relevance_score": {
-                            "type": "number",
-                            "description": "Relevance score from 0-1"
-                        },
-                        "methodology_score": {
-                            "type": "number",
-                            "description": "Methodology quality score from 0-1"
-                        },
-                        "findings_score": {
-                            "type": "number",
-                            "description": "Significance of findings score from 0-1"
-                        },
-                        "key_findings": {
-                            "type": "string",
-                            "description": "Brief summary of key findings related to the topic"
-                        },
-                        "include": {
-                            "type": "boolean",
-                            "description": "Whether to include this paper in the final set"
-                        }
-                    },
-                    "required": ["relevance_score", "methodology_score",
-                                 "findings_score", "key_findings", "include"]
-                }
-            }
-        }]
-
-
-    def _llm_filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Content-based filtering and analysis using LLM"""
-        system_prompt = """You are a research paper analysis specialist.
-        Evaluate papers for their relevance to our research topic and analyze their content.
-        Consider:
-        1. How directly the paper addresses our topic
-        2. Quality and rigor of methodology
-        3. Significance and clarity of findings
-        4. Usefulness of conclusions for our topic
-
-        Be critical and selective - only include papers that provide substantial value."""
-
-        llm_with_tools = self.llm.bind_tools(self.tools)
-        results = []
-
-        # Statisztikák inicializálása
-        stats = {
-            'total': len(df),
-            'processed': 0,
-            'included': 0,
-            'errors': 0,
-            'scores': {
-                'relevance': [],
-                'methodology': [],
-                'findings': [],
-                'content': [],
-                'final': []
-            }
-        }
-
-        print(f"\nStarting content-based filtering of {len(df)} papers...")
-        print("-" * 80)
-
-        # for idx, row in df.iterrows():
-        for i in range(len(df)):
-            row = df.iloc[i]
-
-            # print(f"\nAnalyzing paper {idx + 1}/{len(df)}: {row['Title'][:100]}...")
-            print(f"\nAnalyzing paper {i + 1}/{len(df)}: {row['Title'][:100]}...")
-
-            prompt = f"""Research topic: {self.state.topic}
-
-            Paper Title: {row['Title']}
-            TLDR: {row['TLDR']} 
-            Abstract: {row['Abstract']}
-            Year: {row['Year']}
-            Citations: {row['Citations']}
-
-            Analyze this paper's relevance and content.
-            - For relevance_score: focus on direct connection to our topic
-            - For methodology_score: evaluate study design and rigor
-            - For findings_score: assess significance and clarity of results
-            - For key_findings: extract main conclusions relevant to our topic
-            - For include: be selective, only true if paper adds substantial value
-
-            Use the analyze_paper_relevance function to provide your analysis."""
-
-            try:
-                response = llm_with_tools.invoke([
-                    SystemMessage(content=system_prompt),
-                    HumanMessage(content=prompt)
-                ])
-
-                # Get analysis from tool call
-                llm_analysis = response.tool_calls[0]["args"]
-
-                # Calculate scores
-                content_score = (
-                        llm_analysis['relevance_score'] * 0.4 +
-                        llm_analysis['methodology_score'] * 0.3 +
-                        llm_analysis['findings_score'] * 0.3
-                )
-
-                final_score = (
-                        row['relevance_score'] * 0.3 +  # Citation-based
-                        content_score * 0.7  # Content-based
-                )
-
-                # Log detailed scores
-                print("\nScores:")
-                print(f"Relevance:    {llm_analysis['relevance_score']:.3f}")
-                print(f"Methodology:  {llm_analysis['methodology_score']:.3f}")
-                print(f"Findings:     {llm_analysis['findings_score']:.3f}")
-                print(f"Content:      {content_score:.3f}")
-                print(f"Final:        {final_score:.3f}")
-                print(f"Decision:     {'INCLUDED' if llm_analysis['include'] else 'EXCLUDED'}")
-                print(f"Key Findings: {llm_analysis['key_findings'][:200]}...")
-
-                # Add scores and analysis to row
-                row_dict = row.to_dict()
-
-                content_score = llm_analysis['relevance_score'] * 0.4 + llm_analysis['methodology_score'] * 0.3 + llm_analysis['findings_score'] * 0.3
-                d_new = {
-                    'llm_relevance': llm_analysis['relevance_score'],
-                    'methodology_quality': llm_analysis['methodology_score'],
-                    'findings_significance': llm_analysis['findings_score'],
-                    'key_findings': llm_analysis['key_findings'],
-                    'content_score': content_score,
-                    'final_score': final_score
-                }
-
-                row_dict.update(d_new)
-
-                # Calculate final score combining metrics and content
-                row_dict['final_score'] = (
-                        row_dict['relevance_score'] * 0.3 +  # Citation-based
-                        row_dict['content_score'] * 0.7  # Content-based
-                )
-
-                if llm_analysis['include']:
-                    stats['included'] += 1
-                    results.append(row_dict)
-
-            except Exception as e:
-                print(f"Error in LLM analysis for {row['Title']}: {e}")
-                stats['errors'] += 1
-                continue
-
-        # Print final statistics
-        print("\nFILTERING SUMMARY")
-        print("=" * 80)
-        print(f"Papers processed:  {stats['processed']}/{stats['total']}")
-        print(f"Papers included:   {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
-        print(f"Errors:           {stats['errors']}")
-
-        print("\nAVERAGE SCORES")
-        print("-" * 80)
-        for score_type, scores in stats['scores'].items():
-            if scores:
-                avg = sum(scores) / len(scores)
-                print(f"{score_type.title():12} {avg:.3f}")
-        print("=" * 80)
-
-
-
-        result_df = pd.DataFrame(results)
-
-        # Sort by final score
-        result_df = result_df.sort_values('final_score', ascending=False)
-
-        # Reorder columns
-        column_order = [
-            'Title',
-            'Year',
-            'Citations',
-            # Citation-based metrics
-            'citations_per_year',
-            'cpy_score',
-            'citation_score',
-            'recency_score',
-            'relevance_score',
-            # Content-based metrics
-            'llm_relevance',
-            'methodology_quality',
-            'findings_significance',
-            'content_score',
-            'final_score',
-            # Content
-            'key_findings',
-            'Abstract',
-            'TLDR',
-            'URL',
-            'Source Query'
-        ]
-
-        # Handle any additional columns
-        remaining_cols = [col for col in result_df.columns if col not in column_order]
-        column_order.extend(remaining_cols)
-
-        return result_df[column_order]
-
-    def process(self, state: ResearchState) -> ResearchState:
-
-        self.state = state
-
-        """Content-based filtering process"""
-        print(f"Loading citation-filtered data from {state.filtered_csv_path}")
-        state.final_csv_path = state.generate_final_path()
-        print(f"Final filtered results will be saved to {state.final_csv_path}")
-
-        # Load citation-filtered data
-        filtered_df = pd.read_csv(state.filtered_csv_path)
-
-        # LLM-based filtering
-        if self.llm:
-            print("\nStep 2: Content-based filtering and analysis...")
-            final_df = self._llm_filter(filtered_df)
-
-            # Save final results
-            final_df.to_csv(state.final_csv_path, index=False)
-
-            print("\nFiltering and analysis complete!")
-            print(f"Original articles: {len(filtered_df)}")
-            print(f"After content filter: {len(final_df)}")
-
-            # Display sample results
-            print("\nTop 5 papers after content filtering:")
-            final_cols = ['Title', 'Year', 'Citations',
-                         'relevance_score', 'content_score', 'final_score']
-            print(final_df[final_cols].head().to_string())
-        else:
-            print("\nLLM not provided, skipping content-based filtering.")
-
-        return state
-
-
-
 class ContentSynthesisAgent(ResearchAgent):
     def __init__(self, llm: Any):
         super().__init__(llm)
-        # Tool for structured synthesis output
         self.tools = [{
             "type": "function",
             "function": {
                 "name": "synthesize_research_content",
-                "description": "Synthesize research content into main themes and findings",
+                "description": "Analyze and synthesize research papers, selecting relevant ones for the topic",
                 "parameters": {
                     "type": "object",
                     "properties": {
+                        "selected_papers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "relevance_score": {"type": "number"},
+                                    "reasoning": {"type": "string"}
+                                },
+                                "required": ["title", "relevance_score", "reasoning"]
+                            },
+                            "description": "Papers selected as relevant for the research topic"
+                        },
                         "main_themes": {
                             "type": "array",
                             "items": {
@@ -1265,50 +1038,63 @@ class ContentSynthesisAgent(ResearchAgent):
                             "description": "Overall synthesis of the research findings"
                         }
                     },
-                    "required": ["main_themes", "research_directions", "synthesis_summary"]
+                    "required": ["selected_papers", "main_themes", "research_directions", "synthesis_summary"]
                 }
             }
         }]
 
     def process(self, state: ResearchState) -> ResearchState:
-        """Process the final filtered papers and create content synthesis"""
+        """Process the title-filtered papers, select relevant ones and create synthesis"""
         print("\nStarting content synthesis...")
 
-        # Load final filtered data
-        df = pd.read_csv(state.final_csv_path)
+        # Load title-filtered data
+        print(f"Loading data from {state.title_filtered_path}")
+        df = pd.read_csv(state.title_filtered_path)
 
-        # Create synthesis file path
-        base, _ = os.path.splitext(state.final_csv_path)
-        synthesis_path = f"{base}_synthesis.md"
+        # Create output paths
+        base, _ = os.path.splitext(state.title_filtered_path)
+        synthesis_md_path = f"{base.replace('title_filtered', 'synthesis')}.md"
+        state.synthesis_results_path = f"{base.replace('title_filtered', 'synthesis_results')}.csv"
 
-        system_prompt = """You are a research synthesis specialist. Your task is to analyze research papers
-        and identify main themes, key findings, and research directions. Focus on:
-        1. Identifying core themes and how papers relate to them
-        2. Extracting and organizing key findings
-        3. Recognizing emerging research directions
-        Be thorough and organized in your analysis."""
+        print(f"Synthesis results will be saved to: {state.synthesis_results_path}")
+        print(f"Synthesis summary will be saved to: {synthesis_md_path}")
+
+        system_prompt = """You are a research synthesis specialist. Your task is to:
+        1. Evaluate each paper's relevance to the research topic
+        2. Select only papers that provide valuable insights for the topic
+        3. Identify main themes and findings
+        4. Recognize research directions
+
+        Be selective - only include papers that directly contribute to understanding the research topic.
+        Provide clear reasoning for paper selection/rejection.
+        Create a comprehensive synthesis of the selected papers."""
 
         # Prepare paper data for analysis
         papers_data = []
         for _, row in df.iterrows():
             papers_data.append({
                 'title': row['Title'],
-                'tldr': row['TLDR'] if pd.notna(row['TLDR']) else None,
                 'abstract': row['Abstract'],
-                'key_findings': row['key_findings'],
-                'year': row['Year']
+                'tldr': row['TLDR'] if pd.notna(row['TLDR']) else None,
+                'year': row['Year'],
+                'study_type': row['study_type'] if 'study_type' in row else None
             })
 
-        # Create analysis prompt
         prompt = f"""Research topic: {state.topic}
 
-        Analyze these papers and synthesize their content into main themes and findings.
-        Focus on identifying core research themes, key findings, and future directions.
+        Analyze these papers for relevance and synthesize their content.
+        For each paper:
+        1. Evaluate relevance to: {state.topic}
+        2. Provide clear reasoning for inclusion/exclusion
+        3. Score relevance from 0-1
+
+        Only include papers that provide direct value for understanding {state.topic}.
+        Create a thorough synthesis of the selected papers.
 
         Papers to analyze:
         {json.dumps(papers_data, indent=2)}
 
-        Create a thorough synthesis using the synthesize_research_content function."""
+        Use the synthesize_research_content function for your analysis."""
 
         try:
             # Get synthesis from LLM
@@ -1321,18 +1107,51 @@ class ContentSynthesisAgent(ResearchAgent):
             # Get synthesis from tool call
             synthesis = response.tool_calls[0]["args"]
 
-            # Create markdown content
-            markdown_content = self._create_markdown(synthesis, state.topic)
+            # Process selected papers
+            selected_papers = synthesis['selected_papers']
+            print(f"\nPaper Selection Results:")
+            print("=" * 80)
+            print(f"Total papers analyzed: {len(papers_data)}")
+            print(f"Papers selected: {len(selected_papers)}")
 
-            # Save synthesis
-            with open(synthesis_path, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
+            # Create DataFrame with selected papers
+            selected_indices = []
+            selection_info = []
 
-            print(f"\nContent synthesis complete!")
-            print(f"Results saved to: {synthesis_path}")
+            for paper in selected_papers:
+                idx = df[df['Title'] == paper['title']].index
+                if not idx.empty:
+                    selected_indices.append(idx[0])
+                    selection_info.append({
+                        'relevance_score': paper['relevance_score'],
+                        'selection_reasoning': paper['reasoning']
+                    })
 
-            # Save path for next agent
-            state.synthesis_path = synthesis_path
+            if selected_indices:
+                # Create results DataFrame
+                results_df = df.iloc[selected_indices].copy()
+                # Add selection info
+                for col, values in zip(['relevance_score', 'selection_reasoning'],
+                                       zip(*[(info['relevance_score'], info['selection_reasoning'])
+                                             for info in selection_info])):
+                    results_df[col] = values
+
+                # Sort by relevance score
+                results_df = results_df.sort_values('relevance_score', ascending=False)
+
+                # Save to CSV
+                results_df.to_csv(state.synthesis_results_path, index=False)
+                print(f"\nSaved {len(results_df)} selected papers to {state.synthesis_results_path}")
+
+                # Create and save synthesis markdown
+                markdown_content = self._create_markdown(synthesis, state.topic)
+                with open(synthesis_md_path, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                print(f"Synthesis summary saved to: {synthesis_md_path}")
+            else:
+                print("\nWarning: No papers were selected as relevant")
+                # Save empty results
+                df.head(0).to_csv(state.synthesis_results_path, index=False)
 
             return state
 
@@ -1344,11 +1163,20 @@ class ContentSynthesisAgent(ResearchAgent):
         """Create markdown document from synthesis results"""
         markdown = f"""# Research Synthesis: {topic}
 
-## Overview
-{synthesis['synthesis_summary']}
-
-## Main Research Themes
+## Selected Papers
 """
+        # Add selected papers section
+        markdown += "\nThe following papers were selected as relevant for this topic:\n"
+        for paper in synthesis['selected_papers']:
+            markdown += f"\n### {paper['title']}\n"
+            markdown += f"Relevance Score: {paper['relevance_score']:.2f}\n"
+            markdown += f"Reasoning: {paper['reasoning']}\n"
+
+        # Add synthesis summary
+        markdown += f"\n## Overview\n{synthesis['synthesis_summary']}\n"
+
+        # Add main themes
+        markdown += "\n## Main Research Themes\n"
         for theme in synthesis['main_themes']:
             markdown += f"\n### {theme['theme']}\n"
             markdown += f"{theme['description']}\n\n"
@@ -1359,7 +1187,8 @@ class ContentSynthesisAgent(ResearchAgent):
             for paper in theme['related_papers']:
                 markdown += f"- {paper}\n"
 
-        markdown += "\n## Research Directions\n"
+        # Add research directions
+        markdown += "\n## Future Research Directions\n"
         for direction in synthesis['research_directions']:
             markdown += f"- {direction}\n"
 
@@ -1533,6 +1362,12 @@ class EvidenceAnalysisAgent(ResearchAgent):
 
 class ResearchWorkflow:
     """Manages the multi-agent research workflow"""
+    # Új folyamat:
+    # 1. KeywordAgent -> keywords
+    # 2. PublicationSearchAgent -> raw_results.csv
+    # 3. CitationFilterAgent -> citation_filtered.csv
+    # 4. TitleFilterAgent -> title_filtered.csv
+    # 5. ContentSynthesisAgent -> synthesis_results.csv
 
     def __init__(self, llm_configs: Dict[str, Any]):
         self.agents = {
@@ -1570,9 +1405,9 @@ class ResearchWorkflow:
             # Initialize state with unique CSV path
             self.state = ResearchState(
                 topic=topic,
-                temp_csv_path=self._generate_session_filename(topic)
+                raw_result_path=self._generate_session_filename(topic)
             )
-            print(f"Results will be saved to: {self.state.temp_csv_path}")
+            print(f"Results will be saved to: {self.state.raw_result_path}")
 
             # Process workflow - each agent handles its own feedback
             self.state = self.workflow.invoke(self.state)
@@ -1620,13 +1455,13 @@ def test_publication_search_agent():
     state = ResearchState(
         topic="Interactive Test",
         keywords=keywords,
-        temp_csv_path=filename
+        raw_result_path=filename
     )
 
     agent = PublicationSearchAgent(None)
     result_state = agent.process(state)
 
-    print(f"\nResults written to: {result_state.temp_csv_path}")
+    print(f"\nResults written to: {result_state.raw_result_path}")
 # test_publication_search_agent()
 # import sys
 # sys.exit()
@@ -1639,7 +1474,7 @@ def test_filtering_agents():
         topic="Health effects of eggs on cardiovascular health",
         keywords=["eggs cardiovascular health meta-analysis",
                  "eggs cholesterol heart disease review"],
-        temp_csv_path=input_csv
+        raw_result_path=input_csv
     )
 
     # 1. Citation filtering
@@ -1659,133 +1494,73 @@ def test_filtering_agents():
     title_agent = TitleFilterAgent(llm)
     state = title_agent.process(state, batch_size=10)  # Set batch size in process call
 
-    # 2. Content filtering
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    llm = ChatGroq(
-        model="llama3-70b-8192",
-        groq_api_key=groq_api_key,
-        temperature=0,
-        max_tokens=1024
-    )
-    content_agent = ContentFilterAgent(llm)
-    state = content_agent.process(state)
-
     return state
-
-test_filtering_agents()
-import sys
-sys.exit()
-
-
-def test_filter_rank_agent():
-    print("FilterRank Agent Test")
-
-    input_csv = 'test_publication_search_agent_result.csv'
-
-    state = ResearchState(
-        topic="Health effects of eggs on cardiovascular health",
-        keywords=["eggs cardiovascular health meta-analysis",
-                  "eggs cholesterol heart disease review"],
-        temp_csv_path=input_csv
-    )
-    groq_api_key = os.getenv("GROQ_API_KEY")
-
-    # Initialize with LLM
-    # llm = ChatOpenAI(model="gpt-4", temperature=0)
-    llm = ChatGroq(
-        model="llama3-70b-8192",
-        groq_api_key=groq_api_key,
-        temperature=0,
-        max_tokens=1024
-    )
-    agent = FilterRankAgent(llm)
-
-    result_state = agent.process(state)
-
-    # Load and display results from both steps
-    citation_df = pd.read_csv(result_state.filtered_csv_path)
-    final_df = pd.read_csv(result_state.final_csv_path)
-
-    print("\nSummary of filtering steps:")
-    print(f"Citation-filtered articles: {len(citation_df)}")
-    print(f"Final filtered articles: {len(final_df)}")
-
-    return result_state
-test_filter_rank_agent()
-import sys
-sys.exit()
-
-
-def test_filter_rank_agent():
-    print("FilterRank Agent Test")
-
-    input_csv = 'test_publication_search_agent_result.csv'
-
-    state = ResearchState(
-        topic="Health effects of eggs on cardiovascular health",
-        keywords=["eggs cardiovascular health meta-analysis",
-                  "eggs cholesterol heart disease review"],
-        temp_csv_path=input_csv
-    )
-    groq_api_key = os.getenv("GROQ_API_KEY")
-
-    # Initialize with LLM
-    # llm = ChatOpenAI(model="gpt-4", temperature=0)
-    llm = ChatGroq(
-        model="llama3-70b-8192",
-        groq_api_key=groq_api_key,
-        temperature=0,
-        max_tokens=1024
-    )
-    agent = FilterRankAgent(llm)
-
-    result_state = agent.process(state)
-
-    # Load and display results from both steps
-    citation_df = pd.read_csv(result_state.filtered_csv_path)
-    final_df = pd.read_csv(result_state.final_csv_path)
-
-    print("\nSummary of filtering steps:")
-    print(f"Citation-filtered articles: {len(citation_df)}")
-    print(f"Final filtered articles: {len(final_df)}")
-
-    return result_state
-test_filter_rank_agent()
-import sys
-sys.exit()
-
-def test_synthesis_and_analysis():
-    print("Testing Content Synthesis and Evidence Analysis")
-
-    # Load test data
-    input_csv = 'research_results_Health_effects_of_eggs_on_cardiovascular_health_20241106_212158_final_filtered.csv'
-
-    # Initialize state
-    state = ResearchState(
-        topic="Health effects of eggs on cardiovascular health",
-        keywords=["eggs cardiovascular health meta-analysis",
-                  "eggs cholesterol heart disease review"],
-        temp_csv_path=input_csv,
-        final_csv_path=input_csv
-    )
-
-    # Initialize agents with LLM
-    llm = ChatOpenAI(model="gpt-4", temperature=0)
-
-    # 1. Run Content Synthesis
-    print("\nStep 1: Content Synthesis")
-    synthesis_agent = ContentSynthesisAgent(llm)
-    state = synthesis_agent.process(state)
-
-    # 2. Run Evidence Analysis
-    print("\nStep 2: Evidence Analysis")
-    analysis_agent = EvidenceAnalysisAgent(llm)
-    state = analysis_agent.process(state)
-
-    return state
-# test_synthesis_and_analysis()
+# test_filtering_agents()
 # import sys
 # sys.exit()
+
+
+def test_content_synthesis():
+    print("ContentSynthesisAgent Test")
+
+    input_csv = 'test_publication_search_agent_result_title_filtered.csv'
+    state = ResearchState(
+        topic="Health effects of eggs on cardiovascular health",
+        keywords=["eggs cardiovascular health meta-analysis",
+                  "eggs cholesterol heart disease review"],
+        raw_result_path=input_csv,
+        title_filtered_path=input_csv  # Set as both temp and title_filtered for test
+    )
+
+    # Initialize with Groq LLM
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    llm = ChatGroq(
+        model="llama3-70b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=1024
+    )
+
+    synthesis_agent = ContentSynthesisAgent(llm)
+
+    print("\nStarting synthesis test...")
+    print("=" * 80)
+    state = synthesis_agent.process(state)
+
+    # Load and display results
+    title_df = pd.read_csv(state.title_filtered_path)
+    synthesis_df = pd.read_csv(state.synthesis_results_path)
+
+    print("\nSYNTHESIS RESULTS")
+    print("=" * 80)
+    print(f"Input papers:          {len(title_df)}")
+    print(f"Selected papers:       {len(synthesis_df)}")
+    print(f"Selection rate:        {len(synthesis_df) / len(title_df) * 100:.1f}%")
+
+    if len(synthesis_df) > 0:
+        print("\nTop 5 most relevant papers:")
+        print("-" * 80)
+        display_cols = ['Title', 'Year', 'relevance_score', 'selection_reasoning']
+        print(synthesis_df[display_cols].head().to_string())
+
+    # Check if synthesis markdown was created
+    base, _ = os.path.splitext(state.title_filtered_path)
+    synthesis_md_path = f"{base.replace('title_filtered', 'synthesis')}.md"
+
+    if os.path.exists(synthesis_md_path):
+        with open(synthesis_md_path, 'r', encoding='utf-8') as f:
+            synthesis_content = f.read()
+            print("\nSynthesis document created successfully")
+            print(f"Length: {len(synthesis_content)} characters")
+    else:
+        print("\nWarning: Synthesis document was not created")
+
+    return state
+test_content_synthesis()
+import sys
+sys.exit()
+
+
 
 def test_workflow():
     # Configure LLMs for different agents
