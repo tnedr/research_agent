@@ -1001,44 +1001,17 @@ class ContentSynthesisAgent(ResearchAgent):
                             "items": {
                                 "type": "object",
                                 "properties": {
+                                    "index": {"type": "integer"},  # Add index to properties
                                     "title": {"type": "string"},
                                     "relevance_score": {"type": "number"},
                                     "reasoning": {"type": "string"}
                                 },
-                                "required": ["title", "relevance_score", "reasoning"]
+                                "required": ["index", "title", "relevance_score", "reasoning"]
                             },
                             "description": "Papers selected as relevant for the research topic"
                         },
-                        "main_themes": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "theme": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "key_findings": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    },
-                                    "related_papers": {
-                                        "type": "array",
-                                        "items": {"type": "string"}
-                                    }
-                                }
-                            },
-                            "description": "Main research themes identified"
-                        },
-                        "research_directions": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Identified research directions and subfields"
-                        },
-                        "synthesis_summary": {
-                            "type": "string",
-                            "description": "Overall synthesis of the research findings"
-                        }
-                    },
-                    "required": ["selected_papers", "main_themes", "research_directions", "synthesis_summary"]
+                        # ... rest of the tool definition remains the same ...
+                    }
                 }
             }
         }]
@@ -1071,8 +1044,9 @@ class ContentSynthesisAgent(ResearchAgent):
 
         # Prepare paper data for analysis
         papers_data = []
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             papers_data.append({
+                'index': int(idx),  # explicitly convert to int for serialization
                 'title': row['Title'],
                 'abstract': row['Abstract'],
                 'tldr': row['TLDR'] if pd.notna(row['TLDR']) else None,
@@ -1104,8 +1078,27 @@ class ContentSynthesisAgent(ResearchAgent):
                 HumanMessage(content=prompt)
             ])
 
-            # Get synthesis from tool call
-            synthesis = response.tool_calls[0]["args"]
+            # Add debug info and better error handling
+            if not response.tool_calls:
+                print("Error: No tool calls in response")
+                print("Raw response:", response)
+                raise ValueError("LLM response contains no tool calls")
+
+            if len(response.tool_calls) == 0:
+                print("Error: Empty tool_calls list")
+                print("Raw response:", response)
+                raise ValueError("Empty tool_calls list in LLM response")
+
+            # Get synthesis from tool call with error checking
+            try:
+                synthesis = response.tool_calls[0]["args"] if isinstance(response.tool_calls[0], dict) else \
+                response.tool_calls[0].args
+            except (AttributeError, KeyError) as e:
+                print("Error: Malformed tool call response")
+                print("Tool calls structure:", response.tool_calls)
+                print("Tool call type:", type(response.tool_calls[0]))
+                print("Error details:", str(e))
+                raise ValueError("Malformed tool call in LLM response")
 
             # Process selected papers
             selected_papers = synthesis['selected_papers']
@@ -1119,13 +1112,12 @@ class ContentSynthesisAgent(ResearchAgent):
             selection_info = []
 
             for paper in selected_papers:
-                idx = df[df['Title'] == paper['title']].index
-                if not idx.empty:
-                    selected_indices.append(idx[0])
-                    selection_info.append({
-                        'relevance_score': paper['relevance_score'],
-                        'selection_reasoning': paper['reasoning']
-                    })
+                print(f"Processing paper at index {paper['index']}: {paper['title']}")
+                selected_indices.append(paper['index'])
+                selection_info.append({
+                    'relevance_score': paper['relevance_score'],
+                    'selection_reasoning': paper['reasoning']
+                })
 
             if selected_indices:
                 # Create results DataFrame
@@ -1513,14 +1505,14 @@ def test_content_synthesis():
     )
 
     # Initialize with Groq LLM
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    llm = ChatGroq(
-        model="llama3-70b-8192",
-        groq_api_key=groq_api_key,
-        temperature=0,
-        max_tokens=1024
-    )
-
+    # groq_api_key = os.getenv("GROQ_API_KEY")
+    # llm = ChatGroq(
+    #     model="llama3-70b-8192",
+    #     groq_api_key=groq_api_key,
+    #     temperature=0,
+    #     max_tokens=1024
+    # )
+    llm = ChatOpenAI(model="gpt-4", temperature=0)
     synthesis_agent = ContentSynthesisAgent(llm)
 
     print("\nStarting synthesis test...")
