@@ -16,9 +16,28 @@ import time
 import requests
 import json
 from typing import List
+import logging
+from datetime import datetime
+
+
 
 os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
+
+
+
+# Set up the logging configuration
+logging.basicConfig(
+    level=logging.INFO,  # Default level; can be configured as needed
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("research_workflow.log"),  # Logs to a file
+        logging.StreamHandler()                        # Logs to the console
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 # Data Models
@@ -84,11 +103,11 @@ class ResearchAgent(ABC):
         """Determine if human feedback is needed"""
         return False
 
-
-class KeywordAgent(ResearchAgent):
-    # todo lehetne beletenni olyant, hogy a finding vagy a search alapjan uj keywordoket javasol
+# todo lehetne beletenni olyant, hogy a finding vagy a search alapjan uj keywordoket javasol
     # az nagyon tuti lenne, ekkor folyamatosan novekednne az eselye, hogy megtalalja a legjobb
     # papirokat
+class KeywordAgent(ResearchAgent):
+
     def __init__(self, llm: Any):
         super().__init__(llm)
         self.tools = [{
@@ -193,18 +212,12 @@ class PublicationSearchAgent(ResearchAgent):
         super().__init__(llm)
         self.max_results = 10
 
-    def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
-        print(f"\nFound {len(articles)} articles ({new_articles} new)")
-        # CSV update azonnal
-        self.update_csv(state)
-
-
     def process(self, state: ResearchState) -> ResearchState:
-        print(f"\nI'll now search for articles using the {len(state.keywords)} queries.")
+        logger.info(f"Starting search for articles using {len(state.keywords)} queries.")
         total_new = 0
 
         for i, query in enumerate(state.keywords, 1):
-            print(f"\nQuery {i}/{len(state.keywords)}: '{query}'")
+            logger.info(f"Query {i}/{len(state.keywords)}: '{query}'")
             articles = self.fetch_articles(query)
 
             # Store results
@@ -213,65 +226,51 @@ class PublicationSearchAgent(ResearchAgent):
             # Update unique articles
             new_articles = 0
             for article in articles:
-                # if article.title not in state.all_articles or \
-                #         article.citations > state.all_articles[article.title].citations:
                 if article.title not in state.all_articles:
                     state.all_articles[article.title] = article
                     new_articles += 1
                 else:
-                    print('Skipping article, already exist:', article.title)
+                    logger.debug(f"Skipping article, already exists: {article.title}")
+
             total_new += new_articles
+            logger.info(f"Found {len(articles)} articles with data (among them {new_articles} new)")
 
-            # Show minimal results
-            print(f"\nFound {len(articles)} articles with data (among them {new_articles} new)")
-
-        # A végén egyszer írjuk ki a CSV-t az összes unique cikkel
+        # Save unique articles to CSV at the end
         self.update_csv(state)
-        print(f"\nTotal unique articles collected: {len(state.all_articles)}")
+        logger.info(f"Total unique articles collected: {len(state.all_articles)}")
 
         return state
 
     def update_csv(self, state: ResearchState):
-        """Update CSV with unique articles, sorted by citations and year"""
-        # Use unique articles from state.all_articles
-        records = []
-        for article in state.all_articles.values():
-            # Find which queries found this article
-            queries = []
-            for query, articles in state.articles_by_query.items():
-                if any(a.title == article.title for a in articles):
-                    queries.append(query)
+        """Update CSV with unique articles, sorted by citations and year."""
+        try:
+            records = []
+            for article in state.all_articles.values():
+                # Find which queries found this article
+                queries = [query for query, articles in state.articles_by_query.items() if article.title in [a.title for a in articles]]
 
-            records.append({
-                'Citations': article.citations or 0,
-                'Year': article.publication_year,
-                'Title': article.title,
-                'Authors': article.authors,
-                'Abstract': article.abstract,
-                'TLDR': article.tldr,
-                'URL': article.url,
-                'Source Query': '; '.join(queries)  # All queries that found this article
-            })
+                records.append({
+                    'Citations': article.citations or 0,
+                    'Year': article.publication_year,
+                    'Title': article.title,
+                    'Authors': article.authors,
+                    'Abstract': article.abstract,
+                    'TLDR': article.tldr,
+                    'URL': article.url,
+                    'Source Query': '; '.join(queries)
+                })
 
-        # Create DataFrame and sort
-        df = pd.DataFrame(records)
-        if not df.empty:
-            df = df.sort_values(
-                by=['Citations', 'Year'],
-                ascending=[False, False]
-            )
+            df = pd.DataFrame(records)
+            if not df.empty:
+                df = df.sort_values(by=['Citations', 'Year'], ascending=[False, False])
+                df.to_csv(state.raw_result_path, index=False)
+                logger.info(f"Saved {len(df)} unique articles to {state.raw_result_path}")
 
-            # Ensure column order
-            columns = ['Citations', 'Year', 'Title', 'Authors', 'Abstract', 'TLDR', 'URL', 'Source Query']
-            df = df[columns]
-
-            # Save to CSV
-            df.to_csv(state.raw_result_path, index=False)
-            print(f"Saved {len(df)} unique articles to {state.raw_result_path}")
+        except Exception as e:
+            logger.exception(f"Failed to update CSV: {str(e)}")
 
     def fetch_articles(self, query: str, max_results: int = 20) -> List[Article]:
-        articles = []
-
+        """Fetch articles based on the query from an external API."""
         articles = []
         retries = 5  # Maximum retry attempts
         backoff_factor = 2  # Factor for exponential backoff (1s, 2s, 4s, etc.)
@@ -279,13 +278,11 @@ class PublicationSearchAgent(ResearchAgent):
 
         try:
             for attempt in range(retries):
-
                 try:
                     url = "https://api.semanticscholar.org/graph/v1/paper/search"
                     params = {
                         "query": query,
                         "limit": max_results,
-                        # https://api.semanticscholar.org/api-docs#tag/Paper-Data/operation/post_graph_get_papers
                         "fields": "title,tldr,abstract,url,venue,authors,citationCount,influentialCitationCount,publicationDate,year,isOpenAccess,openAccessPdf"
                     }
                     response = requests.get(url, params=params)
@@ -294,32 +291,24 @@ class PublicationSearchAgent(ResearchAgent):
                         results = response.json().get('data', [])
 
                         for bib in results:
-                            # Ellenőrizzük, hogy minden szükséges mező megvan-e
+                            # Check if all necessary fields are present
                             raw_title = bib.get('title')
                             raw_abstract = bib.get('abstract')
                             raw_tldr = bib.get('tldr')
                             raw_url = bib.get('url')
                             raw_authors = bib.get('authors')
                             raw_citations = bib.get('citationCount')
-                            raw_influential_citations = bib.get('influentialCitationCount') # todo implement this
-                            raw_year = bib.get('year')
+                            raw_influential_citations = bib.get('influentialCitationCount', 0)
+                            raw_year = bib.get('year', 1900)
 
-                            # Csak akkor dolgozzuk fel, ha minden mező létezik és nem None
+                            # Ensure mandatory fields are present
                             if raw_title and (raw_abstract or raw_tldr) and raw_url and raw_citations is not None:
-                                if raw_year is None:
-                                    raw_year = 1900
-                                # Process abstract for CSV format
-                                if raw_abstract is None:
-                                    processed_abstract = 'None'
-                                else:
-                                    processed_abstract = " ".join(raw_abstract.split()).strip()
-                                if raw_tldr is None:
-                                    processed_tldr = 'None'
-                                else:
-                                    processed_tldr = raw_tldr['text']
-                                if raw_influential_citations is None:
-                                    raw_influential_citations = 0
                                 processed_authors = ', '.join([author['name'] for author in raw_authors])
+                                # processed_abstract = raw_abstract.strip() if raw_abstract else 'None'
+                                processed_abstract = " ".join(raw_abstract.split()) if raw_abstract else 'None'
+
+
+                                processed_tldr = raw_tldr['text'] if raw_tldr else 'None'
 
                                 article = Article(
                                     title=raw_title,
@@ -330,50 +319,33 @@ class PublicationSearchAgent(ResearchAgent):
                                     citations=raw_citations,
                                     influential_citations=raw_influential_citations,
                                     publication_year=raw_year,
-                                    source="Google Scholar"
+                                    source="Semantic Scholar"
                                 )
                                 articles.append(article)
-                                print(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
+                                logger.debug(f"Found: {article.title} ({article.publication_year}, {article.citations} citations)")
                             else:
-                                print(f"Skipping article due to missing fields: {bib}")
+                                logger.warning(f"Skipping article due to missing fields: {bib}")
 
                         return articles
 
                     elif response.status_code == 429:
-                        print(f"Error 429: Too many requests. Retrying in {delay} seconds...")
+                        logger.warning(f"Error 429: Too many requests. Retrying in {delay} seconds...")
                         time.sleep(delay)
                         delay *= backoff_factor  # Increase delay for the next retry
 
                     else:
-                        print(f"Error fetching data: {response.status_code}")
+                        logger.error(f"Error fetching data: {response.status_code}")
                         break  # Break loop if it's a different error
 
                 except requests.exceptions.RequestException as e:
-                    print(f"Request error: {str(e)}")
+                    logger.error(f"Request error: {str(e)}")
                     break  # Exit on network error
 
         except Exception as e:
-            print(f"Error searching for '{query}': {str(e)}")
+            logger.exception(f"Error searching for '{query}': {str(e)}")
 
         return articles
 
-    def _show_results(self, articles: List[Article], new_articles: int, state: ResearchState):
-        print(f"\nFound {len(articles)} articles ({new_articles} new)")
-        print("\nTop articles from this search:")
-        sorted_articles = sorted(articles, key=lambda x: x.citations or 0, reverse=True)
-        for i, art in enumerate(sorted_articles[:5], 1):
-            print(f"{i}. [{art.citations} citations] {art.title}")
-
-    def _show_all_articles(self, state: ResearchState):
-        print(f"\nAll unique articles collected so far: {len(state.all_articles)}")
-        print("\nTop articles overall:")
-        sorted_articles = sorted(
-            state.all_articles.values(),
-            key=lambda x: x.citations or 0,
-            reverse=True
-        )
-        for i, art in enumerate(sorted_articles[:10], 1):
-            print(f"{i}. [{art.citations} citations] {art.title}")
 
 
 class FilterRankAgent(ResearchAgent):
@@ -1455,9 +1427,9 @@ def test_publication_search_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.raw_result_path}")
-# test_publication_search_agent()
-# import sys
-# sys.exit()
+test_publication_search_agent()
+import sys
+sys.exit()
 
 
 
