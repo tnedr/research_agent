@@ -2,6 +2,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 from langgraph.graph import Graph, MessageGraph
 from langchain_openai.chat_models import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import Tool
 from langchain.pydantic_v1 import BaseModel, Field
@@ -39,13 +40,19 @@ class ResearchState(BaseModel):
     articles_by_query: Dict[str, List[Article]] = Field(default_factory=dict)  # query -> [Article]
     all_articles: Dict[str, Article] = Field(default_factory=dict)  # title -> Article
     temp_csv_path: str = "research_articles.csv"  # CSV útvonal
-    filtered_csv_path: str = ""  # Citation-based filtering results
-    final_csv_path: str = ""     # LLM-based filtering results
+    filtered_csv_path: str = ""    # Citation-based filtering results
+    title_filtered_path: str = ""  # Title-based filtering results
+    final_csv_path: str = ""       # LLM-based filtering results
 
     def generate_filtered_path(self) -> str:
         """Generate citation-filtered CSV path based on original path"""
         base, ext = os.path.splitext(self.temp_csv_path)
         return f"{base}_citation_filtered{ext}"
+
+    def generate_title_filtered_path(self) -> str:
+        """Generate title-filtered CSV path"""
+        base, ext = os.path.splitext(self.temp_csv_path)
+        return f"{base}_title_filtered{ext}"
 
     def generate_final_path(self) -> str:
         """Generate final filtered CSV path"""
@@ -410,95 +417,21 @@ class FilterRankAgent(ResearchAgent):
 
 
 
-    def _calculate_citation_metrics(self, row: pd.Series) -> tuple:
-        """
-        Calculate citation metrics:
-        - Citations per year
-        - Total citations (normalized)
-        - Recency score
-        """
-        year = row['Year']
-        citations = row['Citations']
+    def _log_paper_scores(self, title: str, scores: Dict, include: bool):
+        """Pretty print paper scores"""
+        print("\n" + "=" * 80)
+        print(f"Paper: {title}")
+        print("-" * 80)
+        print(f"Relevance Score:     {scores['relevance_score']:.3f}")
+        print(f"Methodology Score:   {scores['methodology_score']:.3f}")
+        print(f"Findings Score:      {scores['findings_score']:.3f}")
+        print(f"Content Score:       {scores['content_score']:.3f}")
+        print(f"Citation Score:      {scores['citation_score']:.3f}")
+        print(f"Final Score:         {scores['final_score']:.3f}")
+        print(f"Decision:            {'INCLUDED' if include else 'EXCLUDED'}")
+        print(f"Key Findings:        {scores['key_findings']}")
+        print("=" * 80 + "\n")
 
-        # Citations per year
-        years_since_pub = self.current_year - year + 1
-        citations_per_year = citations / years_since_pub
-
-        # Recency score (0-1, newer is higher)
-        recency_score = (year - self.min_year) / (self.current_year - self.min_year)
-
-        return citations_per_year, citations, recency_score
-
-
-    def _initial_filter(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Initial filtering and ranking based on citation metrics.
-        No LLM used here.
-        """
-        print(f"Starting initial filter with {len(df)} articles...")
-
-        # Create working copy
-        filtered_df = df.copy()
-
-        # Calculate all metrics
-        metrics = []
-        for idx, row in filtered_df.iterrows():
-            cpy, total_cites, recency = self._calculate_citation_metrics(row)
-            metrics.append({
-                'Title': row['Title'],
-                'citations_per_year': cpy,
-                'citation_score': total_cites,
-                'recency_score': recency
-            })
-
-        # Convert metrics to DataFrame and merge with original
-        metrics_df = pd.DataFrame(metrics)
-        filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
-
-        # Basic filtering
-        filtered_df = filtered_df[
-            (filtered_df['citations_per_year'] >= self.min_citations_per_year) &
-            (filtered_df['Year'] >= self.min_year)
-            ]
-
-        print(f"After basic filtering: {len(filtered_df)} articles")
-
-        if filtered_df.empty:
-            print("Warning: No articles passed the initial filter. Relaxing criteria...")
-            filtered_df = df.copy()
-            filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
-
-        # Normalize scores to 0-1 range
-        if len(filtered_df) > 0:
-            # Citations per year score
-            max_cpy = filtered_df['citations_per_year'].max()
-            filtered_df['cpy_score'] = filtered_df['citations_per_year'] / max_cpy if max_cpy > 0 else 0
-
-            # Total citations score
-            max_cites = filtered_df['Citations'].max()
-            filtered_df['citation_score'] = filtered_df['Citations'] / max_cites if max_cites > 0 else 0
-
-            # Calculate final relevance score
-            filtered_df['relevance_score'] = (
-                    filtered_df['cpy_score'] * 0.4 +  # Citations per year (largest weight)
-                    filtered_df['citation_score'] * 0.3 +  # Total citations
-                    filtered_df['recency_score'] * 0.3  # Recency
-            )
-
-        # Sort by relevance score and keep top papers
-        result_df = filtered_df.sort_values(
-            by='relevance_score',
-            ascending=False
-        ).head(self.max_papers)
-
-        # Display metrics for debugging
-        print("\nTop 5 papers with metrics:")
-        display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
-                        'cpy_score', 'citation_score', 'recency_score', 'relevance_score']
-        pd.set_option('display.max_columns', None)
-        print(result_df[display_cols].head().to_string())
-
-        return result_df
 
     def _llm_filter(self, df: pd.DataFrame) -> pd.DataFrame:
         """Content-based filtering and analysis using LLM"""
@@ -515,8 +448,30 @@ class FilterRankAgent(ResearchAgent):
         llm_with_tools = self.llm.bind_tools(self.tools)
         results = []
 
-        for idx, row in df.iterrows():
-            print(f"\nAnalyzing paper {idx + 1}/{len(df)}: {row['Title'][:100]}...")
+        # Statisztikák inicializálása
+        stats = {
+            'total': len(df),
+            'processed': 0,
+            'included': 0,
+            'errors': 0,
+            'scores': {
+                'relevance': [],
+                'methodology': [],
+                'findings': [],
+                'content': [],
+                'final': []
+            }
+        }
+
+        print(f"\nStarting content-based filtering of {len(df)} papers...")
+        print("-" * 80)
+
+        # for idx, row in df.iterrows():
+        for i in range(len(df)):
+            row = df.iloc[i]
+
+            # print(f"\nAnalyzing paper {idx + 1}/{len(df)}: {row['Title'][:100]}...")
+            print(f"\nAnalyzing paper {i + 1}/{len(df)}: {row['Title'][:100]}...")
 
             prompt = f"""Research topic: {self.state.topic}
 
@@ -544,6 +499,28 @@ class FilterRankAgent(ResearchAgent):
                 # Get analysis from tool call
                 llm_analysis = response.tool_calls[0]["args"]
 
+                # Calculate scores
+                content_score = (
+                        llm_analysis['relevance_score'] * 0.4 +
+                        llm_analysis['methodology_score'] * 0.3 +
+                        llm_analysis['findings_score'] * 0.3
+                )
+
+                final_score = (
+                        row['relevance_score'] * 0.3 +  # Citation-based
+                        content_score * 0.7  # Content-based
+                )
+
+                # Log detailed scores
+                print("\nScores:")
+                print(f"Relevance:    {llm_analysis['relevance_score']:.3f}")
+                print(f"Methodology:  {llm_analysis['methodology_score']:.3f}")
+                print(f"Findings:     {llm_analysis['findings_score']:.3f}")
+                print(f"Content:      {content_score:.3f}")
+                print(f"Final:        {final_score:.3f}")
+                print(f"Decision:     {'INCLUDED' if llm_analysis['include'] else 'EXCLUDED'}")
+                print(f"Key Findings: {llm_analysis['key_findings'][:200]}...")
+
                 # Add scores and analysis to row
                 row_dict = row.to_dict()
 
@@ -553,7 +530,8 @@ class FilterRankAgent(ResearchAgent):
                     'methodology_quality': llm_analysis['methodology_score'],
                     'findings_significance': llm_analysis['findings_score'],
                     'key_findings': llm_analysis['key_findings'],
-                    'content_score': content_score
+                    'content_score': content_score,
+                    'final_score': final_score
                 }
 
                 row_dict.update(d_new)
@@ -565,11 +543,30 @@ class FilterRankAgent(ResearchAgent):
                 )
 
                 if llm_analysis['include']:
+                    stats['included'] += 1
                     results.append(row_dict)
 
             except Exception as e:
                 print(f"Error in LLM analysis for {row['Title']}: {e}")
+                stats['errors'] += 1
                 continue
+
+        # Print final statistics
+        print("\nFILTERING SUMMARY")
+        print("=" * 80)
+        print(f"Papers processed:  {stats['processed']}/{stats['total']}")
+        print(f"Papers included:   {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
+        print(f"Errors:           {stats['errors']}")
+
+        print("\nAVERAGE SCORES")
+        print("-" * 80)
+        for score_type, scores in stats['scores'].items():
+            if scores:
+                avg = sum(scores) / len(scores)
+                print(f"{score_type.title():12} {avg:.3f}")
+        print("=" * 80)
+
+
 
         result_df = pd.DataFrame(results)
 
@@ -663,6 +660,568 @@ class FilterRankAgent(ResearchAgent):
             print(f"Results saved to: {state.filtered_csv_path}")
 
         return state
+
+
+class CitationFilterAgent(ResearchAgent):
+    def __init__(self):
+        super().__init__(None)  # Nincs szükség LLM-re ehhez
+        self.current_year = 2024
+        self.min_citations = 5
+        self.min_citations_per_year = 0.5
+        self.min_year = 1990
+        self.max_papers = 20
+
+
+    def _calculate_citation_metrics(self, row: pd.Series) -> tuple:
+        """
+        Calculate citation metrics:
+        - Citations per year
+        - Total citations (normalized)
+        - Recency score
+        """
+        year = row['Year']
+        citations = row['Citations']
+
+        # Citations per year
+        years_since_pub = self.current_year - year + 1
+        citations_per_year = citations / years_since_pub
+
+        # Recency score (0-1, newer is higher)
+        recency_score = (year - self.min_year) / (self.current_year - self.min_year)
+
+        return citations_per_year, citations, recency_score
+
+    def _initial_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Initial filtering and ranking based on citation metrics.
+        No LLM used here.
+        """
+        print(f"Starting initial filter with {len(df)} articles...")
+
+        # Create working copy
+        filtered_df = df.copy()
+
+        # Calculate all metrics
+        metrics = []
+        for idx, row in filtered_df.iterrows():
+            cpy, total_cites, recency = self._calculate_citation_metrics(row)
+            metrics.append({
+                'Title': row['Title'],
+                'citations_per_year': cpy,
+                'citation_score': total_cites,
+                'recency_score': recency
+            })
+
+        # Convert metrics to DataFrame and merge with original
+        metrics_df = pd.DataFrame(metrics)
+        filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
+
+        # Basic filtering
+        filtered_df = filtered_df[
+            (filtered_df['citations_per_year'] >= self.min_citations_per_year) &
+            (filtered_df['Year'] >= self.min_year)
+            ]
+
+        print(f"After basic filtering: {len(filtered_df)} articles")
+
+        if filtered_df.empty:
+            print("Warning: No articles passed the initial filter. Relaxing criteria...")
+            filtered_df = df.copy()
+            filtered_df = pd.merge(filtered_df, metrics_df, on='Title')
+
+        # Normalize scores to 0-1 range
+        if len(filtered_df) > 0:
+            # Citations per year score
+            max_cpy = filtered_df['citations_per_year'].max()
+            filtered_df['cpy_score'] = filtered_df['citations_per_year'] / max_cpy if max_cpy > 0 else 0
+
+            # Total citations score
+            max_cites = filtered_df['Citations'].max()
+            filtered_df['citation_score'] = filtered_df['Citations'] / max_cites if max_cites > 0 else 0
+
+            # Calculate final relevance score
+            filtered_df['relevance_score'] = (
+                    filtered_df['cpy_score'] * 0.4 +  # Citations per year (largest weight)
+                    filtered_df['citation_score'] * 0.3 +  # Total citations
+                    filtered_df['recency_score'] * 0.3  # Recency
+            )
+
+        # Sort by relevance score and keep top papers
+        result_df = filtered_df.sort_values(
+            by='relevance_score',
+            ascending=False
+        ).head(self.max_papers)
+
+        # Display metrics for debugging
+        print("\nTop 5 papers with metrics:")
+        display_cols = ['Title', 'Year', 'Citations', 'citations_per_year',
+                        'cpy_score', 'citation_score', 'recency_score', 'relevance_score']
+        pd.set_option('display.max_columns', None)
+        print(result_df[display_cols].head().to_string())
+
+        return result_df
+
+    def process(self, state: ResearchState) -> ResearchState:
+        """Citation-based filtering process"""
+        print(f"Loading data from {state.temp_csv_path}")
+        state.filtered_csv_path = state.generate_filtered_path()
+        print(f"Citation-filtered results will be saved to {state.filtered_csv_path}")
+
+        # Load data
+        df = pd.read_csv(state.temp_csv_path)
+
+        # Citation-based filtering
+        print("\nStep 1: Citation-based filtering...")
+        filtered_df = self._initial_filter(df)
+
+        # Save results
+        filtered_df.to_csv(state.filtered_csv_path, index=False)
+        print(f"\nSaved {len(filtered_df)} citation-filtered articles to {state.filtered_csv_path}")
+
+        return state
+
+
+class TitleFilterAgent(ResearchAgent):
+    def __init__(self, llm: Any):
+        super().__init__(llm)
+        self.tools = [{
+            "type": "function",
+            "function": {
+                "name": "analyze_titles_batch",
+                "description": "Analyze multiple paper titles for relevance",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "paper_analyses": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "index": {
+                                        "type": "integer",
+                                        "description": "Index of the paper in the original list"
+                                    },
+                                    "relevance_score": {
+                                        "type": "number",
+                                        "description": "Title relevance score from 0-1"
+                                    },
+                                    "topic_match": {
+                                        "type": "boolean",
+                                        "description": "Does title match research topic"
+                                    },
+                                    "study_type": {
+                                        "type": "string",
+                                        "description": "Type of study (meta-analysis, review, trial, etc.)"
+                                    },
+                                    "importance_rank": {
+                                        "type": "integer",
+                                        "description": "Relative importance rank within the batch (1 being most important)"
+                                    },
+                                    "reasoning": {
+                                        "type": "string",
+                                        "description": "Brief explanation of the relevance assessment"
+                                    }
+                                },
+                                "required": ["index", "relevance_score", "topic_match", "study_type", "importance_rank",
+                                             "reasoning"]
+                            }
+                        }
+                    },
+                    "required": ["paper_analyses"]
+                }
+            }
+        }]
+
+    def _analyze_title_batch(self, papers: List[Dict], topic: str, batch_size: int = 5) -> List[Dict]:
+        """Analyze a batch of papers"""
+        system_prompt = """You are a research title analysis specialist. 
+        Evaluate multiple paper titles for their relevance to the research topic.
+        For each paper:
+        1. Assess direct topic relevance
+        2. Identify study type
+        3. Assign relative importance rank within the batch
+        Be selective but don't miss valuable papers."""
+
+        papers_info = [
+            {
+                "index": idx,
+                "title": paper['Title'],
+                "year": paper['Year'],
+                "citations": paper['Citations']
+            }
+            for idx, paper in enumerate(papers)
+        ]
+
+        prompt = f"""Research topic: {topic}
+
+        Analyze these papers for relevance:
+        {json.dumps(papers_info, indent=2)}
+
+        For each paper:
+        - Assess relevance to: {topic}
+        - Identify study type (meta-analysis, review, etc.)
+        - Rank importance within this batch
+        - Provide brief reasoning
+
+        Return analysis using the analyze_titles_batch function.
+        Ensure importance_rank ranges from 1 to {len(papers_info)} with no duplicates."""
+
+        try:
+            os.environ["LANGCHAIN_TRACING"] = "false"
+            llm_with_tools = self.llm.bind_tools(self.tools)
+            response = llm_with_tools.invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=prompt)
+            ])
+
+            return response.tool_calls[0]["args"]["paper_analyses"]
+        except Exception as e:
+            print(f"Error in batch analysis: {str(e)}")
+            return []
+
+    def process(self, state: ResearchState, batch_size: int = 10) -> ResearchState:
+        """Process the citation-filtered papers and filter based on titles"""
+        print("\nStarting title-based filtering...")
+
+        # Generate paths
+        base, ext = os.path.splitext(state.filtered_csv_path)
+        state.title_filtered_path = f"{base.replace('citation_filtered', 'title_filtered')}{ext}"
+
+        print(f"Loading citation-filtered data from {state.filtered_csv_path}")
+        print(f"Title-filtered results will be saved to {state.title_filtered_path}")
+
+        # Load the citation-filtered data
+        df = pd.read_csv(state.filtered_csv_path)
+
+        # Initialize statistics
+        stats = {
+            'total': len(df),
+            'processed': 0,
+            'included': 0,
+            'errors': 0,
+            'study_types': {}
+        }
+
+        print(f"\nAnalyzing {len(df)} paper titles in batches of {batch_size}...")
+
+        # Process in batches
+        results = []
+
+        for start_idx in range(0, len(df), batch_size):
+            batch_df = df.iloc[start_idx:start_idx + batch_size]
+            batch_papers = batch_df.to_dict('records')
+
+            print(f"\nProcessing batch {start_idx // batch_size + 1}/{(len(df) + batch_size - 1) // batch_size}")
+
+            batch_results = self._analyze_title_batch(batch_papers, state.topic, batch_size)
+
+            # Process batch results
+            for analysis in batch_results:
+                real_idx = start_idx + analysis['index']
+
+                # Log results
+                print(f"\nPaper {real_idx + 1}: {df.iloc[real_idx]['Title']}")
+                print(f"Relevance:     {analysis['relevance_score']:.3f}")
+                print(f"Topic Match:   {'Yes' if analysis['topic_match'] else 'No'}")
+                print(f"Study Type:    {analysis['study_type']}")
+                print(f"Batch Rank:    {analysis['importance_rank']}")
+                print(f"Reasoning:     {analysis['reasoning']}")
+
+                # Update statistics
+                stats['processed'] += 1
+                stats['study_types'][analysis['study_type']] = \
+                    stats['study_types'].get(analysis['study_type'], 0) + 1
+
+                if analysis['topic_match'] and analysis['relevance_score'] >= 0.5:
+                    stats['included'] += 1
+                    results.append({
+                        'index': real_idx,
+                        'title_relevance': analysis['relevance_score'],
+                        'study_type': analysis['study_type'],
+                        'batch_rank': analysis['importance_rank'],
+                        'reasoning': analysis['reasoning']
+                    })
+
+        # Process results
+        if results:
+            # Sort by relevance score
+            results.sort(key=lambda x: (x['title_relevance'], -x['batch_rank']), reverse=True)
+
+            # Create filtered DataFrame
+            filtered_indices = [r['index'] for r in results]
+            title_filtered_df = df.iloc[filtered_indices].copy()
+
+            # Add analysis results
+            title_filtered_df['title_relevance'] = [r['title_relevance'] for r in results]
+            title_filtered_df['study_type'] = [r['study_type'] for r in results]
+            title_filtered_df['reasoning'] = [r['reasoning'] for r in results]
+
+            title_filtered_df.to_csv(state.title_filtered_path, index=False)
+        else:
+            print("Warning: No papers passed title filtering. Copying citation-filtered data.")
+            df.to_csv(state.title_filtered_path, index=False)
+
+        # Print summary
+        print("\nTITLE FILTERING SUMMARY")
+        print("=" * 80)
+        print(f"Papers processed:  {stats['processed']}/{stats['total']}")
+        print(f"Papers included:   {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
+        print(f"Errors:           {stats['errors']}")
+
+        print("\nSTUDY TYPES FOUND")
+        print("-" * 80)
+        for study_type, count in sorted(stats['study_types'].items(), key=lambda x: x[1], reverse=True):
+            print(f"{study_type:20} {count:3d} papers")
+        print("=" * 80)
+
+        return state
+
+
+class ContentFilterAgent(ResearchAgent):
+    def __init__(self, llm: Any):
+        super().__init__(llm)
+        # Tool for consistent output format
+        self.tools = [{
+            "type": "function",
+            "function": {
+                "name": "analyze_paper_relevance",
+                "description": "Analyze paper relevance and content",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "relevance_score": {
+                            "type": "number",
+                            "description": "Relevance score from 0-1"
+                        },
+                        "methodology_score": {
+                            "type": "number",
+                            "description": "Methodology quality score from 0-1"
+                        },
+                        "findings_score": {
+                            "type": "number",
+                            "description": "Significance of findings score from 0-1"
+                        },
+                        "key_findings": {
+                            "type": "string",
+                            "description": "Brief summary of key findings related to the topic"
+                        },
+                        "include": {
+                            "type": "boolean",
+                            "description": "Whether to include this paper in the final set"
+                        }
+                    },
+                    "required": ["relevance_score", "methodology_score",
+                                 "findings_score", "key_findings", "include"]
+                }
+            }
+        }]
+
+
+    def _llm_filter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Content-based filtering and analysis using LLM"""
+        system_prompt = """You are a research paper analysis specialist.
+        Evaluate papers for their relevance to our research topic and analyze their content.
+        Consider:
+        1. How directly the paper addresses our topic
+        2. Quality and rigor of methodology
+        3. Significance and clarity of findings
+        4. Usefulness of conclusions for our topic
+
+        Be critical and selective - only include papers that provide substantial value."""
+
+        llm_with_tools = self.llm.bind_tools(self.tools)
+        results = []
+
+        # Statisztikák inicializálása
+        stats = {
+            'total': len(df),
+            'processed': 0,
+            'included': 0,
+            'errors': 0,
+            'scores': {
+                'relevance': [],
+                'methodology': [],
+                'findings': [],
+                'content': [],
+                'final': []
+            }
+        }
+
+        print(f"\nStarting content-based filtering of {len(df)} papers...")
+        print("-" * 80)
+
+        # for idx, row in df.iterrows():
+        for i in range(len(df)):
+            row = df.iloc[i]
+
+            # print(f"\nAnalyzing paper {idx + 1}/{len(df)}: {row['Title'][:100]}...")
+            print(f"\nAnalyzing paper {i + 1}/{len(df)}: {row['Title'][:100]}...")
+
+            prompt = f"""Research topic: {self.state.topic}
+
+            Paper Title: {row['Title']}
+            TLDR: {row['TLDR']} 
+            Abstract: {row['Abstract']}
+            Year: {row['Year']}
+            Citations: {row['Citations']}
+
+            Analyze this paper's relevance and content.
+            - For relevance_score: focus on direct connection to our topic
+            - For methodology_score: evaluate study design and rigor
+            - For findings_score: assess significance and clarity of results
+            - For key_findings: extract main conclusions relevant to our topic
+            - For include: be selective, only true if paper adds substantial value
+
+            Use the analyze_paper_relevance function to provide your analysis."""
+
+            try:
+                response = llm_with_tools.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=prompt)
+                ])
+
+                # Get analysis from tool call
+                llm_analysis = response.tool_calls[0]["args"]
+
+                # Calculate scores
+                content_score = (
+                        llm_analysis['relevance_score'] * 0.4 +
+                        llm_analysis['methodology_score'] * 0.3 +
+                        llm_analysis['findings_score'] * 0.3
+                )
+
+                final_score = (
+                        row['relevance_score'] * 0.3 +  # Citation-based
+                        content_score * 0.7  # Content-based
+                )
+
+                # Log detailed scores
+                print("\nScores:")
+                print(f"Relevance:    {llm_analysis['relevance_score']:.3f}")
+                print(f"Methodology:  {llm_analysis['methodology_score']:.3f}")
+                print(f"Findings:     {llm_analysis['findings_score']:.3f}")
+                print(f"Content:      {content_score:.3f}")
+                print(f"Final:        {final_score:.3f}")
+                print(f"Decision:     {'INCLUDED' if llm_analysis['include'] else 'EXCLUDED'}")
+                print(f"Key Findings: {llm_analysis['key_findings'][:200]}...")
+
+                # Add scores and analysis to row
+                row_dict = row.to_dict()
+
+                content_score = llm_analysis['relevance_score'] * 0.4 + llm_analysis['methodology_score'] * 0.3 + llm_analysis['findings_score'] * 0.3
+                d_new = {
+                    'llm_relevance': llm_analysis['relevance_score'],
+                    'methodology_quality': llm_analysis['methodology_score'],
+                    'findings_significance': llm_analysis['findings_score'],
+                    'key_findings': llm_analysis['key_findings'],
+                    'content_score': content_score,
+                    'final_score': final_score
+                }
+
+                row_dict.update(d_new)
+
+                # Calculate final score combining metrics and content
+                row_dict['final_score'] = (
+                        row_dict['relevance_score'] * 0.3 +  # Citation-based
+                        row_dict['content_score'] * 0.7  # Content-based
+                )
+
+                if llm_analysis['include']:
+                    stats['included'] += 1
+                    results.append(row_dict)
+
+            except Exception as e:
+                print(f"Error in LLM analysis for {row['Title']}: {e}")
+                stats['errors'] += 1
+                continue
+
+        # Print final statistics
+        print("\nFILTERING SUMMARY")
+        print("=" * 80)
+        print(f"Papers processed:  {stats['processed']}/{stats['total']}")
+        print(f"Papers included:   {stats['included']} ({stats['included'] / stats['total'] * 100:.1f}%)")
+        print(f"Errors:           {stats['errors']}")
+
+        print("\nAVERAGE SCORES")
+        print("-" * 80)
+        for score_type, scores in stats['scores'].items():
+            if scores:
+                avg = sum(scores) / len(scores)
+                print(f"{score_type.title():12} {avg:.3f}")
+        print("=" * 80)
+
+
+
+        result_df = pd.DataFrame(results)
+
+        # Sort by final score
+        result_df = result_df.sort_values('final_score', ascending=False)
+
+        # Reorder columns
+        column_order = [
+            'Title',
+            'Year',
+            'Citations',
+            # Citation-based metrics
+            'citations_per_year',
+            'cpy_score',
+            'citation_score',
+            'recency_score',
+            'relevance_score',
+            # Content-based metrics
+            'llm_relevance',
+            'methodology_quality',
+            'findings_significance',
+            'content_score',
+            'final_score',
+            # Content
+            'key_findings',
+            'Abstract',
+            'TLDR',
+            'URL',
+            'Source Query'
+        ]
+
+        # Handle any additional columns
+        remaining_cols = [col for col in result_df.columns if col not in column_order]
+        column_order.extend(remaining_cols)
+
+        return result_df[column_order]
+
+    def process(self, state: ResearchState) -> ResearchState:
+
+        self.state = state
+
+        """Content-based filtering process"""
+        print(f"Loading citation-filtered data from {state.filtered_csv_path}")
+        state.final_csv_path = state.generate_final_path()
+        print(f"Final filtered results will be saved to {state.final_csv_path}")
+
+        # Load citation-filtered data
+        filtered_df = pd.read_csv(state.filtered_csv_path)
+
+        # LLM-based filtering
+        if self.llm:
+            print("\nStep 2: Content-based filtering and analysis...")
+            final_df = self._llm_filter(filtered_df)
+
+            # Save final results
+            final_df.to_csv(state.final_csv_path, index=False)
+
+            print("\nFiltering and analysis complete!")
+            print(f"Original articles: {len(filtered_df)}")
+            print(f"After content filter: {len(final_df)}")
+
+            # Display sample results
+            print("\nTop 5 papers after content filtering:")
+            final_cols = ['Title', 'Year', 'Citations',
+                         'relevance_score', 'content_score', 'final_score']
+            print(final_df[final_cols].head().to_string())
+        else:
+            print("\nLLM not provided, skipping content-based filtering.")
+
+        return state
+
 
 
 class ContentSynthesisAgent(ResearchAgent):
@@ -1057,7 +1616,7 @@ def test_publication_search_agent():
     keywords = ["eggs cardiovascular health meta-analysis",
                 "eggs cholesterol heart disease review"]
 
-    filename = 'test1_results.csv'
+    filename = 'test_publication_search_agent_result.csv'
     state = ResearchState(
         topic="Interactive Test",
         keywords=keywords,
@@ -1072,10 +1631,56 @@ def test_publication_search_agent():
 # import sys
 # sys.exit()
 
+
+
+def test_filtering_agents():
+    input_csv = 'test_publication_search_agent_result.csv'
+    state = ResearchState(
+        topic="Health effects of eggs on cardiovascular health",
+        keywords=["eggs cardiovascular health meta-analysis",
+                 "eggs cholesterol heart disease review"],
+        temp_csv_path=input_csv
+    )
+
+    # 1. Citation filtering
+    citation_agent = CitationFilterAgent()
+    state = citation_agent.process(state)
+
+    # 2. Title filtering with batch processing
+    print("\nStep 2: Title-based filtering")
+    print("=" * 80)
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    llm = ChatGroq(
+        model="llama3-70b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=1024
+    )
+    title_agent = TitleFilterAgent(llm)
+    state = title_agent.process(state, batch_size=10)  # Set batch size in process call
+
+    # 2. Content filtering
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    llm = ChatGroq(
+        model="llama3-70b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=1024
+    )
+    content_agent = ContentFilterAgent(llm)
+    state = content_agent.process(state)
+
+    return state
+
+test_filtering_agents()
+import sys
+sys.exit()
+
+
 def test_filter_rank_agent():
     print("FilterRank Agent Test")
 
-    input_csv = 'test1_results_used.csv'
+    input_csv = 'test_publication_search_agent_result.csv'
 
     state = ResearchState(
         topic="Health effects of eggs on cardiovascular health",
@@ -1083,9 +1688,16 @@ def test_filter_rank_agent():
                   "eggs cholesterol heart disease review"],
         temp_csv_path=input_csv
     )
+    groq_api_key = os.getenv("GROQ_API_KEY")
 
     # Initialize with LLM
-    llm = ChatOpenAI(model="gpt-4", temperature=0)
+    # llm = ChatOpenAI(model="gpt-4", temperature=0)
+    llm = ChatGroq(
+        model="llama3-70b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=1024
+    )
     agent = FilterRankAgent(llm)
 
     result_state = agent.process(state)
@@ -1099,9 +1711,48 @@ def test_filter_rank_agent():
     print(f"Final filtered articles: {len(final_df)}")
 
     return result_state
-# test_filter_rank_agent()
-# import sys
-# sys.exit()
+test_filter_rank_agent()
+import sys
+sys.exit()
+
+
+def test_filter_rank_agent():
+    print("FilterRank Agent Test")
+
+    input_csv = 'test_publication_search_agent_result.csv'
+
+    state = ResearchState(
+        topic="Health effects of eggs on cardiovascular health",
+        keywords=["eggs cardiovascular health meta-analysis",
+                  "eggs cholesterol heart disease review"],
+        temp_csv_path=input_csv
+    )
+    groq_api_key = os.getenv("GROQ_API_KEY")
+
+    # Initialize with LLM
+    # llm = ChatOpenAI(model="gpt-4", temperature=0)
+    llm = ChatGroq(
+        model="llama3-70b-8192",
+        groq_api_key=groq_api_key,
+        temperature=0,
+        max_tokens=1024
+    )
+    agent = FilterRankAgent(llm)
+
+    result_state = agent.process(state)
+
+    # Load and display results from both steps
+    citation_df = pd.read_csv(result_state.filtered_csv_path)
+    final_df = pd.read_csv(result_state.final_csv_path)
+
+    print("\nSummary of filtering steps:")
+    print(f"Citation-filtered articles: {len(citation_df)}")
+    print(f"Final filtered articles: {len(final_df)}")
+
+    return result_state
+test_filter_rank_agent()
+import sys
+sys.exit()
 
 def test_synthesis_and_analysis():
     print("Testing Content Synthesis and Evidence Analysis")
