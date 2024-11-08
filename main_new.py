@@ -1018,6 +1018,7 @@ class ContentSynthesisAgent(ResearchAgent):
 
     def process(self, state: ResearchState) -> ResearchState:
         """Process the title-filtered papers, select relevant ones and create synthesis"""
+        self.state = state
         print("\nStarting content synthesis...")
 
         # Load title-filtered data
