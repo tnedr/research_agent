@@ -527,6 +527,10 @@ class TitleFilterAgent(ResearchAgent):
 
     def _analyze_title_batch(self, papers: List[Dict], topic: str, batch_size: int = 5) -> List[Dict]:
         """Analyze a batch of papers"""
+
+        max_retries = 3
+        base_delay = 2  # seconds
+
         system_prompt = """You are a research title analysis specialist. 
         Evaluate multiple paper titles for their relevance to the research topic.
         For each paper:
@@ -547,30 +551,50 @@ class TitleFilterAgent(ResearchAgent):
 
         prompt = f"""Research topic: {topic}
 
-        Analyze these papers for relevance:
+        Input papers to analyze:
         {json.dumps(papers_info, indent=2)}
 
-        For each paper:
-        - Assess relevance to: {topic}
-        - Identify study type (meta-analysis, review, etc.)
-        - Rank importance within this batch
-        - Provide brief reasoning
+        INSTRUCTIONS:
+        1. You MUST use the analyze_titles_batch function to return your analysis
+        2. For EACH paper, provide:
+           - index (from input)
+           - relevance_score (0-1 float)
+           - topic_match (true/false)
+           - study_type (string)
+           - importance_rank (1 to {len(papers_info)}, no duplicates)
+           - reasoning (brief explanation)
 
-        Return analysis using the analyze_titles_batch function.
-        Ensure importance_rank ranges from 1 to {len(papers_info)} with no duplicates."""
+        Analyze all papers and return results ONLY through the function."""
 
-        try:
-            os.environ["LANGCHAIN_TRACING"] = "false"
-            llm_with_tools = self.llm.bind_tools(self.tools)
-            response = llm_with_tools.invoke([
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=prompt)
-            ])
 
-            return response.tool_calls[0]["args"]["paper_analyses"]
-        except Exception as e:
-            print(f"Error in batch analysis: {str(e)}")
-            return []
+        os.environ["LANGCHAIN_TRACING"] = "false"
+        llm_with_tools = self.llm.bind_tools(self.tools)
+
+        for attempt in range(max_retries):
+
+            try:
+                response = llm_with_tools.invoke([
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=prompt)
+                ])
+                if not response.tool_calls:
+                    raise ValueError("No tool calls in response")
+                if not response.tool_calls[0].get("args", {}).get("paper_analyses"):
+                    raise ValueError("No paper analyses in response")
+                analyses = response.tool_calls[0]["args"]["paper_analyses"]
+                return analyses
+            except Exception as e:
+                delay = base_delay * (2 ** attempt)  # exponential backoff
+                logger.warning(f"base delay {base_delay}, attempt {attempt}, delay {delay}")
+                logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+                logger.warning(f"Retrying in {delay} seconds...")
+
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                else:
+                    logger.error(f"All retries failed for batch analysis. Error: {str(e)}")
+                    # Return empty list or partial results depending on your needs
+                    return []
 
     def process(self, state: ResearchState, batch_size: int = 10) -> ResearchState:
         """Process the citation-filtered papers and filter based on titles"""
@@ -613,8 +637,8 @@ class TitleFilterAgent(ResearchAgent):
                 real_idx = start_idx + analysis['index']
 
                 paper_title = df.iloc[real_idx]['Title']
-                logger.debug(f"Analysis for Paper {real_idx + 1}: {paper_title}")
-                logger.debug(
+                logger.info(f"Analysis for Paper {real_idx + 1}: {paper_title[:10]}")
+                logger.info(
                     f"Relevance: {analysis['relevance_score']:.3f}, Topic Match: {'Yes' if analysis['topic_match'] else 'No'}")
                 logger.debug(f"Study Type: {analysis['study_type']}, Batch Rank: {analysis['importance_rank']}")
                 logger.debug(f"Reasoning: {analysis['reasoning']}")
@@ -1056,8 +1080,8 @@ def test_publication_search_agent():
     result_state = agent.process(state)
 
     print(f"\nResults written to: {result_state.raw_result_path}")
-test_publication_search_agent()
-sys.exit()
+# test_publication_search_agent()
+# sys.exit()
 
 
 
@@ -1088,8 +1112,8 @@ def test_filtering_agents():
     state = title_agent.process(state, batch_size=10)  # Set batch size in process call
 
     return state
-# test_filtering_agents()
-# sys.exit()
+test_filtering_agents()
+sys.exit()
 
 
 def test_content_synthesis():
