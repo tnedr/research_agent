@@ -9,6 +9,8 @@ langchain-openai = "*"
 langchain-anthropic = "*"
 langchain-groq = "*"
 langgraph = "*"
+scholarly = "*"
+pandas = "*"
 
 [dev-packages]
 
