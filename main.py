@@ -1102,8 +1102,8 @@ def test_keyword_agent():
     print("\nGenerated keywords:", result_state.keywords)
 
     return result_state.keywords
-test_keyword_agent()
-sys.exit()
+# test_keyword_agent()
+# sys.exit()
 
 
 def test_publication_search_agent():
@@ -1149,8 +1149,8 @@ def test_filtering_agents():
     state = title_agent.process(state, batch_size=10)  # Set batch size in process call
 
     return state
-# test_filtering_agents()
-# sys.exit()
+test_filtering_agents()
+sys.exit()
 
 
 def test_content_synthesis():

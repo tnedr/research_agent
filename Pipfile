@@ -11,6 +11,8 @@ langchain-groq = "*"
 langgraph = "*"
 scholarly = "*"
 pandas = "*"
+ollama = "*"
+langchain-ollama = "*"
 
 [dev-packages]
 
