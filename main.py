@@ -19,7 +19,7 @@ from typing import List
 import logging
 from datetime import datetime
 import sys
-
+from langchain_ollama import ChatOllama
 
 
 
@@ -28,7 +28,7 @@ load_dotenv()
 
 
 
-# Set up the logging configuration
+    # Set up the logging configuration
 logging.basicConfig(
     level=logging.INFO,  # Default level; can be configured as needed
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -40,6 +40,24 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+# Module-level LLM constants
+PRECISE_LLM = ChatOllama(
+    model="llama3-groq-tool-use",
+    temperature=0,
+    base_url="http://localhost:11434",
+    timeout=120,  # Added timeout for stability
+    verbose=True
+)
+
+CREATIVE_LLM = ChatOllama(
+    model="llama3-groq-tool-use",
+    temperature=0.7,  # Higher temperature for more creative responses
+    base_url="http://localhost:11434",
+    timeout=120,
+)
+
 
 
 # Data Models
@@ -768,6 +786,13 @@ class ContentSynthesisAgent(ResearchAgent):
                     paper_analysis = response.tool_calls[0]["args"]
                     paper_analysis['title'] = row['Title']
                     paper_analysis['year'] = row['Year']
+                    paper_analysis['publication_date'] = row['PublicationDate']
+                    paper_analysis['authors'] = row['Authors']
+                    paper_analysis['venue'] = row['Venue']
+                    paper_analysis['pdf_url'] = row['PdfUrl']
+                    paper_analysis['citations'] = row['Citations']
+                    paper_analysis['influential_citations'] = row['InfluentialCitations']
+
                     findings_list.append(paper_analysis)
 
                     # Log findings for this paper
@@ -791,11 +816,29 @@ class ContentSynthesisAgent(ResearchAgent):
     def _create_synthesis_markdown(self, findings_list: List[Dict], topic: str) -> str:
         markdown = f"""# Research Findings Analysis: {topic}
 
-    ## Paper-by-Paper Analysis
-    """
+## Paper-by-Paper Analysis
+"""
         for paper in findings_list:
-            markdown += f"\n### {paper['title']} ({paper['year']}):\n"
-            markdown += "\n#### Key Findings:\n"
+            pdf_url = paper.get('pdf_url')
+            if pdf_url and isinstance(pdf_url, str) and pdf_url.strip():
+                access_text = f'[PDF Available]({pdf_url})'
+            else:
+                access_text = 'PDF Not Available'
+            markdown += f"""
+### {paper['title']} ({paper['year']})
+        
+**Authors:** {paper['authors']}
+
+**Publication Venue:** {paper.get('venue', 'N/A')}
+
+**Publication Date:** {paper.get('publication_date', paper['year'])}
+
+**Citations:** {paper['citations']} (Influential Citations: {paper['influential_citations']})
+
+**Access:** {access_text }
+        
+#### Key Findings:
+"""
             for finding in paper['key_findings']:
                 markdown += f"- {finding}\n"
 
@@ -1043,7 +1086,7 @@ class ResearchWorkflow:
 def test_keyword_agent():
     print("Keyword Agent Test")
     # Configure LLM
-    llm = ChatOpenAI(model="gpt-4", temperature=0)
+    llm = CREATIVE_LLM
     # Initialize with a test topic
     topic = "Health effects of eggs on cardiovascular health"
     print(f"\nTesting keyword generation for topic: {topic}")
@@ -1059,8 +1102,8 @@ def test_keyword_agent():
     print("\nGenerated keywords:", result_state.keywords)
 
     return result_state.keywords
-# test_keyword_agent()
-# sys.exit()
+test_keyword_agent()
+sys.exit()
 
 
 def test_publication_search_agent():
@@ -1101,19 +1144,13 @@ def test_filtering_agents():
     # 2. Title filtering with batch processing
     print("\nStep 2: Title-based filtering")
     print("=" * 80)
-    groq_api_key = os.getenv("GROQ_API_KEY")
-    llm = ChatGroq(
-        model="llama3-70b-8192",
-        groq_api_key=groq_api_key,
-        temperature=0,
-        max_tokens=1024
-    )
+    llm = PRECISE_LLM
     title_agent = TitleFilterAgent(llm)
     state = title_agent.process(state, batch_size=10)  # Set batch size in process call
 
     return state
-test_filtering_agents()
-sys.exit()
+# test_filtering_agents()
+# sys.exit()
 
 
 def test_content_synthesis():
@@ -1128,48 +1165,13 @@ def test_content_synthesis():
         title_filtered_path=input_csv  # Set as both temp and title_filtered for test
     )
 
-    # Initialize with Groq LLM
-    # groq_api_key = os.getenv("GROQ_API_KEY")
-    # llm = ChatGroq(
-    #     model="llama3-70b-8192",
-    #     groq_api_key=groq_api_key,
-    #     temperature=0,
-    #     max_tokens=1024
-    # )
-    llm = ChatOpenAI(model="gpt-4", temperature=0)
+
+    llm = PRECISE_LLM
     synthesis_agent = ContentSynthesisAgent(llm)
 
     print("\nStarting synthesis test...")
     print("=" * 80)
     state = synthesis_agent.process(state)
-
-    # Load and display results
-    title_df = pd.read_csv(state.title_filtered_path)
-    synthesis_df = pd.read_csv(state.synthesis_results_path)
-
-    print("\nSYNTHESIS RESULTS")
-    print("=" * 80)
-    print(f"Input papers:          {len(title_df)}")
-    print(f"Selected papers:       {len(synthesis_df)}")
-    print(f"Selection rate:        {len(synthesis_df) / len(title_df) * 100:.1f}%")
-
-    if len(synthesis_df) > 0:
-        print("\nTop 5 most relevant papers:")
-        print("-" * 80)
-        display_cols = ['Title', 'Year', 'relevance_score', 'selection_reasoning']
-        print(synthesis_df[display_cols].head().to_string())
-
-    # Check if synthesis markdown was created
-    base, _ = os.path.splitext(state.title_filtered_path)
-    synthesis_md_path = f"{base.replace('title_filtered', 'synthesis')}.md"
-
-    if os.path.exists(synthesis_md_path):
-        with open(synthesis_md_path, 'r', encoding='utf-8') as f:
-            synthesis_content = f.read()
-            print("\nSynthesis document created successfully")
-            print(f"Length: {len(synthesis_content)} characters")
-    else:
-        print("\nWarning: Synthesis document was not created")
 
     return state
 test_content_synthesis()
