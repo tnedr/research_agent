@@ -1,12 +1,13 @@
 from ollama import Client
 
 
+
 def test_llm_capabilities():
     client = Client(host='http://localhost:11434')
 
     def ask_question(prompt):
         print(f"\n--- Question: {prompt} ---")
-        response = client.chat(model='llama2',
+        response = client.chat(model='llama3-groq-tool-use',
                                messages=[{
                                    'role': 'user',
                                    'content': prompt
