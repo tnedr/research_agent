@@ -13,6 +13,7 @@ scholarly = "*"
 pandas = "*"
 ollama = "*"
 langchain-ollama = "*"
+matplotlib = "*"
 
 [dev-packages]
 

@@ -2,6 +2,8 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 from langgraph.graph import Graph, MessageGraph
 from langchain_openai.chat_models import ChatOpenAI
+from langchain_anthropic.chat_models import ChatAnthropic
+
 from langchain_groq import ChatGroq
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from langchain.tools import Tool
@@ -20,12 +22,12 @@ import logging
 from datetime import datetime
 import sys
 from langchain_ollama import ChatOllama
+from anthropic import Anthropic
 
 
 
 os.environ["LANGCHAIN_TRACING"] = "false"
 load_dotenv()
-
 
 
     # Set up the logging configuration
@@ -56,6 +58,19 @@ CREATIVE_LLM = ChatOllama(
     temperature=0.7,  # Higher temperature for more creative responses
     base_url="http://localhost:11434",
     timeout=120,
+)
+
+CLAUDE_LLM = ChatAnthropic(
+    model="claude-3-sonnet-20240122",
+    max_tokens=4096,
+    temperature=0.7,
+    anthropic_api_key=os.getenv("ANTHROPIC_API_KEY")
+)
+
+LLM_OPENAI_CREATIVE = ChatOpenAI(
+    model="gpt-4o-mini",
+    temperature=0.7,
+    openai_api_key=os.getenv("OPENAI_API_KEY")
 )
 
 
@@ -1086,7 +1101,7 @@ class ResearchWorkflow:
 def test_keyword_agent():
     print("Keyword Agent Test")
     # Configure LLM
-    llm = CREATIVE_LLM
+    llm = LLM_OPENAI_CREATIVE
     # Initialize with a test topic
     topic = "Health effects of eggs on cardiovascular health"
     print(f"\nTesting keyword generation for topic: {topic}")
@@ -1102,8 +1117,8 @@ def test_keyword_agent():
     print("\nGenerated keywords:", result_state.keywords)
 
     return result_state.keywords
-# test_keyword_agent()
-# sys.exit()
+test_keyword_agent()
+sys.exit()
 
 
 def test_publication_search_agent():
